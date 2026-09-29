@@ -1,7 +1,8 @@
-//! Runnable example: the derive path end to end.
+//! Runnable example: the derive path end to end — **multiple questions from one API
+//! call**, the headline use case for `#[derive(Decision)]`.
 //!
 //! ```text
-//! JEV_API_KEY=sk-... cargo run --example triage --features derive
+//! JEV_API_KEY=sk-... cargo run --example 03_multi_question_decision --features derive
 //! ```
 
 use jev::{Choice, ChoiceOptions, Client, Decision, Noul, Score, ScoreLevels};

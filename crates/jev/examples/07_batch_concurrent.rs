@@ -1,7 +1,7 @@
 //! Runnable example: `decide_all` over a slice of states with bounded concurrency.
 //!
 //! ```text
-//! JEV_API_KEY=sk-... cargo run --example batch --features "derive batch"
+//! JEV_API_KEY=sk-... cargo run --example 07_batch_concurrent --features "derive batch"
 //! ```
 
 use std::num::NonZeroUsize;

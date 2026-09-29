@@ -7,7 +7,7 @@ version = "0.1.0"
 authors = ["Tyr Chen <tyr.chen@gmail.com>"]
 edition = "2024"
 license = "MIT"
-documentation = "https://docs.rs/jev"
+documentation = "https://docs.rs/jev-rust"
 repository = "https://github.com/tyrchen/jev-rust"
 homepage = "https://github.com/tyrchen/jev-rust"
 readme = "README.md"
@@ -15,7 +15,10 @@ rust-version = "1.90"
 
 [workspace.dependencies]
 # jev workspace crates
-jev = { path = "crates/jev", version = "0.1.0", default-features = false }
+# Package name is `jev-rust` (crates.io: `jev` and `jev-rust` were both already
+# taken by unrelated crates); the library itself is still named `jev` via
+# `[lib] name` in crates/jev/Cargo.toml, so downstream `use jev::...` is unaffected.
+jev-rust = { path = "crates/jev", version = "0.1.0", default-features = false }
 jev-macros = { path = "crates/jev-macros", version = "0.1.0" }
 
 # shared third-party dependencies

@@ -97,7 +97,34 @@ introduced by implementation:
   in `Cargo.toml` (the crate uses `let`-chains, stable since 1.88) and the toolchain to
   `1.97.1` in `rust-toolchain.toml`, but has not committed to an N-2 stable floor.
 
-## Blocking issue for a real crates.io publish
+## Package renamed to `jev-rust` (superseding the section below)
+
+The package was renamed from `jev` to **`jev-rust`** at the requester's direction, to
+match this repository's own name. The rename is package-name-only:
+`crates/jev/Cargo.toml` sets `[package] name = "jev-rust"` and `[lib] name = "jev"`,
+so every `use jev::...` statement in this workspace and in any downstream consumer is
+unchanged — only the `[dependencies]` line in a consumer's `Cargo.toml` now reads
+`jev-rust = "0.1"` instead of `jev = "0.1"`. `jev-macros` is unaffected (its own name
+was never taken) and its `dev-dependency` on the SDK crate was updated to the new
+workspace-dependency key (`jev-rust`).
+
+**Checking crates.io while making this change surfaced that `jev-rust` is *also*
+already taken** (v0.1.0, unrelated: a third independent async client for the same
+TypeSafe API, with a builder-style `EvaluateRequest::new(state).question(id, Noul::new(...))`
+shape). So neither `jev` nor `jev-rust` is actually publishable to crates.io today —
+the rename satisfies "match the repository name" but does not, by itself, resolve a
+crates.io publish. The three options in the superseded section below still apply,
+now against two taken names instead of one; a crates.io release under either identity
+still needs a decision from whoever owns that call (a different name entirely, e.g.
+`jev-typesafe` or `typesafe-jev`, is the most likely to be free, but was not checked
+exhaustively since renaming was not the ask this pass).
+
+---
+
+## Superseded: original blocking issue for a real crates.io publish
+
+*(Written when the package was still named `jev`; kept for history. See the section
+above for the current state after the rename to `jev-rust`.)*
 
 **The name `jev` is already taken on crates.io** (v0.1.2, unrelated: a blocking/async
 client for "the TypeSafe System One HTTP API" with a materially different API shape—
@@ -122,3 +149,97 @@ crates.io release decision:
 All code, tests, and docs in this workspace assume the name stays `jev`; renaming is a
 find-and-replace across `Cargo.toml` package names, `use jev::...`, and doc prose, with
 no structural changes required.
+
+## Public-interface improvements adopted from prior art
+
+At the same time as the rename, the public interface of an independent, mature Rust
+client for the same API — [`porky11/jev`](https://gitlab.com/porky11/jev) (published as
+crates.io `jev` v0.1.2, the crate that occupies the name above) — was studied for
+interface ideas. Three ergonomic patterns from that crate (and, for the sampling idea,
+echoed by a third independent client, crates.io `jev-rust` v0.1.0) were adopted, each
+as an *addition* that composes with the existing typed/dynamic layering rather than a
+replacement:
+
+1. **`Verdict` and `Noul::verdict`/`decide`.** `porky11/jev`'s `Verdict::{Yes, Unsure, No}`
+   plus `Verdict::from_probability(yes, threshold)` gives a caller a three-way branch
+   for a yes/no gate instead of manually comparing two thresholds. Adopted as
+   [`Verdict`] and [`Noul::decide_verdict`] in `crates/jev/src/typed.rs`, alongside the
+   existing two-threshold [`Noul::decide`] (kept — the two are complementary: one
+   threshold with a symmetric "distance from the coin flip" semantic, or two independent
+   thresholds for an asymmetric yes/no risk tolerance).
+2. **Human-readable `Display`.** `porky11/jev` renders a `Noul` answer as
+   `"yes, 88% sure"` and a `Score` answer as `"1.88 (harmless 0%, wary 12%, lethal 88%;
+   confidence 82%)"`. Adopted as `Display` impls on `Noul`, `Choice<T>`, and `Score<T>`
+   (using this SDK's own percent/ranking conventions, not copied verbatim), so
+   `println!("{answer}")` is useful without every caller writing its own formatter.
+3. **Reproducible weighted sampling.** `porky11/jev`'s `ChoiceAnswer::sample(roll: f64)`
+   walks the probability distribution and returns the option a caller-supplied `roll`
+   lands on, keeping the draw reproducible (and the crate free of a `rand` dependency)
+   for a caller that wants a scene to play out differently across runs without ever
+   picking an option the model ruled out entirely. Adopted as `Choice::sample(roll)`,
+   returning the typed `T` rather than a string key.
+
+Also adopted, addressing a real gap the prior-art review surfaced (both `porky11/jev`
+and the third `jev-rust` client support an API key-less, self-hosted backend; this SDK
+did not):
+
+4. **`Client::local` / an unauthenticated constructor.** For a System One-compatible
+   backend a caller hosts themselves (no API key, and possibly no `Authorization`
+   header support at all), `Client::with_http` already covered "bring your own
+   `reqwest::Client`" but every constructor still required an API key. Added
+   `Client::without_api_key(base_url)` for the no-`Authorization`-header case,
+   keeping `Client::new`/`from_env`/`from_config` (which do send a key) unchanged.
+5. **Single-question convenience methods on `Client`.** For a one-off dynamic question
+   that does not warrant a `#[derive(Decision)]` struct, added `Client::noul`,
+   `Client::choice::<T>`, and `Client::score::<T>` — each builds a single-question
+   request and returns the typed [`Noul`]/[`Choice<T>`]/[`Score<T>`] answer directly,
+   named to avoid colliding with the derive path's own `Decision`/`ChoiceOptions`/
+   `ScoreLevels` trait methods.
+
+Deliberately **not** adopted, with rationale:
+
+- **`BTreeMap`-keyed `Questions`/answers.** This SDK already committed to `IndexMap` for
+  declaration-order preservation (see the design doc's "Alternatives Considered"); a
+  `BTreeMap`'s alphabetic reordering is a regression for byte-comparable request bodies
+  and natural-order score legends, not an improvement.
+- **A blocking client.** `porky11/jev`'s `TypeSafeClient` blocks by default with an
+  `async` feature adding a second client type. This SDK is async-only by design
+  (see "Alternatives Considered" — "A blocking client" — in the design doc); mirroring
+  the dual-client split would double the client surface for a use case (game engines,
+  synchronous CLIs) this SDK's design doc explicitly defers.
+- **Optional/lenient answer-shape parsing** (`type` tag optional, `usage` defaulting to
+  zero, unknown top-level fields silently ignored beyond `serde`'s own default). This
+  SDK's hostile-input posture treats a response that does not match the documented
+  shape as an error (or, for an unrecognized `type`, as `Answer::Other`) rather than
+  silently filling in a zero; loosening this would weaken the "hostile server" boundary
+  validation the design doc calls for.
+
+## Examples restructured into an easy-to-complex progression
+
+`crates/jev/examples/` grew from three programs to eight, numbered `01`–`08` so
+`ls`/tab-completion sorts them in teaching order. The original three were renamed
+rather than duplicated (`triage.rs` → `03_multi_question_decision.rs`,
+`dynamic.rs` → `04_dynamic_questions.rs`, `batch.rs` → `07_batch_concurrent.rs`);
+their content is materially unchanged beyond the header comment's invocation line.
+The five new programs each demonstrate one concept in isolation rather than
+re-explaining the whole SDK:
+
+| # | File | Concept | Features |
+|---|---|---|---|
+| 1 | `01_single_question.rs` | `Client::noul`: one question, no derive, no struct. | none |
+| 2 | `02_single_typed_choice_and_score.rs` | `Client::choice::<T>`/`Client::score::<T>`: one derived enum, still no `Decision`. | `derive` |
+| 3 | `03_multi_question_decision.rs` | `#[derive(Decision)]`: **multiple questions from one API call** (the design doc's headline case). | `derive` |
+| 4 | `04_dynamic_questions.rs` | `Questions::builder()`: config-driven questions built at runtime. | none |
+| 5 | `05_thresholds_and_escalation.rs` | `Thresholds`, `Verdict`/`decide_verdict`, `accept`: escalating ambiguity instead of guessing. | `derive` |
+| 6 | `06_weighted_sampling.rs` | `Choice::sample`: reproducible weighted sampling for games/simulations. | `derive` |
+| 7 | `07_batch_concurrent.rs` | `decide_all`: bounded-concurrency batching over many states. | `derive`, `batch` |
+| 8 | `08_self_hosted_backend.rs` | `Client::without_api_key`, `Model::Custom`, `Surface::SystemOne`: a self-hosted backend. | `derive` |
+
+All eight compile under `cargo build --all-features --examples` and are covered by
+`cargo clippy --all-targets --all-features -- -D warnings` (and a clean pedantic
+pass). None make a live network call as part of the automated test suite; #1–#7
+need `JEV_API_KEY`/`OPENROUTER_API_KEY` to actually run (per `Client::from_env`),
+and #8 needs a real System One-compatible backend listening at `SELF_HOSTED_URL`.
+`[[example]]` entries with `required-features` were added to `crates/jev/Cargo.toml`
+for every example that needs `derive` and/or `batch`, matching the existing pattern.
+

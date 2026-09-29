@@ -1,5 +1,5 @@
 [package]
-name = "jev"
+name = "jev-rust"
 description = "Typed Rust SDK for the Jev decision model: noul/choice/score primitives as types."
 categories = ["asynchronous", "web-programming::http-client", "api-bindings"]
 keywords = ["jev", "openrouter", "llm", "decision", "async"]
@@ -12,6 +12,14 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 rust-version.workspace = true
+
+[lib]
+## The package is `jev-rust` (crates.io: `jev` and `jev-rust` were both already
+## taken by unrelated crates at the time this SDK was written); the library
+## itself is still named `jev`, so every `use jev::...` in this workspace's own
+## code, and in any downstream consumer, is unaffected by the package rename.
+name = "jev"
+path = "src/lib.rs"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -53,15 +61,34 @@ trybuild.workspace = true
 wiremock.workspace = true
 
 [[example]]
-name = "triage"
+name = "01_single_question"
+
+[[example]]
+name = "02_single_typed_choice_and_score"
 required-features = ["derive"]
 
 [[example]]
-name = "dynamic"
+name = "03_multi_question_decision"
+required-features = ["derive"]
 
 [[example]]
-name = "batch"
+name = "04_dynamic_questions"
+
+[[example]]
+name = "05_thresholds_and_escalation"
+required-features = ["derive"]
+
+[[example]]
+name = "06_weighted_sampling"
+required-features = ["derive"]
+
+[[example]]
+name = "07_batch_concurrent"
 required-features = ["derive", "batch"]
+
+[[example]]
+name = "08_self_hosted_backend"
+required-features = ["derive"]
 
 [[test]]
 name = "derive"

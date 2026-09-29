@@ -463,3 +463,125 @@ async fn test_should_return_decided_with_response_meta_from_decide_with() {
     assert_eq!(decided.meta.usage.input_tokens, 120);
     assert!(decided.value.is_bug.is_yes(0.9));
 }
+
+#[tokio::test]
+async fn test_should_ask_single_noul_question_via_convenience_method() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/alpha/decisions"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value = req.body_json().unwrap();
+            assert_eq!(body["questions"]["noul"]["type"], "noul");
+            assert_eq!(
+                body["questions"]["noul"]["instructions"],
+                "Is this a refund request?"
+            );
+            ResponseTemplate::new(200).set_body_json(json!({
+                "model": "jev-1.13",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "answers": {"noul": {"type": "noul", "noul": 0.87}}
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let is_refund = client
+        .noul("Please refund my order.", "Is this a refund request?")
+        .await
+        .unwrap();
+    assert!(is_refund.is_yes(0.8));
+}
+
+#[tokio::test]
+async fn test_should_ask_single_choice_question_via_convenience_method() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/alpha/decisions"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value = req.body_json().unwrap();
+            assert_eq!(body["questions"]["choice"]["type"], "choice");
+            assert_eq!(
+                body["questions"]["choice"]["criteria"]["payments"],
+                "Checkout, billing, or payment processing issues."
+            );
+            ResponseTemplate::new(200).set_body_json(json!({
+                "model": "jev-1.13",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "answers": {
+                    "choice": {"type": "choice", "choice": "payments", "confidence": 0.9}
+                }
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let team = client
+        .choice::<Team>("a checkout ticket", "Which team owns this?")
+        .await
+        .unwrap();
+    assert_eq!(*team.value(), Team::Payments);
+    assert!(team.confident(0.8));
+}
+
+#[tokio::test]
+async fn test_should_ask_single_score_question_via_convenience_method() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/alpha/decisions"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value = req.body_json().unwrap();
+            assert_eq!(body["questions"]["score"]["type"], "score");
+            assert_eq!(
+                body["questions"]["score"]["criteria"][0],
+                "Can wait for the next release."
+            );
+            ResponseTemplate::new(200).set_body_json(json!({
+                "model": "jev-1.13",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "answers": {"score": {"type": "score", "score": 2.0, "confidence": 0.8}}
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let urgency = client
+        .score::<Urgency>("a checkout ticket", "How urgent is this?")
+        .await
+        .unwrap();
+    assert_eq!(urgency.nearest(), Urgency::BlockingRevenue);
+}
+
+#[tokio::test]
+async fn test_should_send_no_authorization_header_when_built_without_api_key() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/alpha/decisions"))
+        .respond_with(|req: &Request| {
+            assert!(
+                req.headers.get("authorization").is_none(),
+                "expected no Authorization header"
+            );
+            ResponseTemplate::new(200).set_body_json(json!({
+                "model": "jev-1.13",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "answers": {"flag": {"type": "noul", "noul": 0.5}}
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    let client = jev::Client::without_api_key(&server.uri()).unwrap();
+    let questions = Questions::builder()
+        .noul("flag", "Is this flagged?")
+        .build()
+        .unwrap();
+    let response = client.ask("state", &questions).await.unwrap();
+    assert_eq!(response.answers.noul("flag").unwrap(), 0.5);
+}

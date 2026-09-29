@@ -68,10 +68,15 @@ instructions, and `cargo doc` shows a reviewer precisely what the model is asked
 
 ## Crates
 
-| Crate | Description |
+| Crate (package name on crates.io) | Description |
 |---|---|
-| [`jev`](crates/jev) | The SDK: wire types, dynamic question builder, typed `Decision`/`ChoiceOptions`/`ScoreLevels` traits, async `Client` with retry, `Thresholds` config. |
+| [`jev-rust`](crates/jev) (library: `jev`) | The SDK: wire types, dynamic question builder, typed `Decision`/`ChoiceOptions`/`ScoreLevels` traits, async `Client` with retry, `Thresholds` config. |
 | [`jev-macros`](crates/jev-macros) | `#[derive(Decision, ChoiceOptions, ScoreLevels)]`, re-exported from `jev` behind the `derive` feature (default on). |
+
+The package is named `jev-rust` because `jev` was already taken on crates.io by
+an unrelated crate; the library itself keeps the name `jev` via `[lib] name`,
+so `use jev::...` is exactly what application code writes regardless of the
+package name in `Cargo.toml`.
 
 ## Documentation
 
@@ -80,7 +85,11 @@ instructions, and `cargo doc` shows a reviewer precisely what the model is asked
 - [docs/thresholds.md](docs/thresholds.md) — calibration vs. accuracy, escalation, `Thresholds` config.
 - [docs/migration-from-prompt-and-parse.md](docs/migration-from-prompt-and-parse.md) — replacing a chat-model classification prompt.
 - [specs/jev-sdk-design.md](specs/jev-sdk-design.md) — the full design doc this SDK implements.
-- `crates/jev/examples/` — `triage.rs` (the derive path), `dynamic.rs` (config-driven questions), `batch.rs` (`decide_all`).
+- `crates/jev/examples/` — eight runnable programs, easiest to most complex: a
+  single question, a single typed choice/score, the full multi-question derive
+  path, dynamic (config-driven) questions, thresholds and escalation, weighted
+  sampling, bounded-concurrency batching, and a self-hosted backend. See
+  [docs/quickstart.md](docs/quickstart.md#run-the-bundled-examples) for the full list.
 
 ## MSRV, feature flags, and the pinned default model
 

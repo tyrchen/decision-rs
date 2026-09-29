@@ -25,5 +25,5 @@ syn.workspace = true
 
 [dev-dependencies]
 trybuild.workspace = true
-jev = { workspace = true, features = ["derive"] }
+jev-rust = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

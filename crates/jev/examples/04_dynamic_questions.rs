@@ -1,7 +1,7 @@
 //! Runnable example: questions built from configuration at runtime (the dynamic path).
 //!
 //! ```text
-//! JEV_API_KEY=sk-... cargo run --example dynamic
+//! JEV_API_KEY=sk-... cargo run --example 04_dynamic_questions
 //! ```
 
 use jev::{Client, Questions};

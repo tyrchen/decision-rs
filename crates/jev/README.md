@@ -1,10 +1,13 @@
-# jev
+# jev-rust
 
 Typed Rust SDK for the [Jev](https://openrouter.ai/docs/guides/community/jev)
 decision model — a *System One* model that answers typed `noul`/`choice`/`score`
 questions with calibrated probabilities instead of prose.
 
-See the [workspace README](../../README.md) and [crate-level rustdoc](https://docs.rs/jev)
+Published as the `jev-rust` package (the library itself is still named `jev`,
+so every `use jev::...` below is exactly what you write).
+
+See the [workspace README](../../README.md) and [crate-level rustdoc](https://docs.rs/jev-rust)
 for the full picture; the short version:
 
 ```rust,no_run

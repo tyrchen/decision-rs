@@ -142,5 +142,5 @@ pub use jev_macros::{ChoiceOptions, Decision, ScoreLevels};
 pub use model::{DEFAULT_MODEL, Model};
 pub use question::{NoulCriteria, Question, Questions, QuestionsBuilder};
 pub use state::State;
-pub use typed::{Choice, ChoiceOptions, Decision, Noul, Score, ScoreLevels};
+pub use typed::{Choice, ChoiceOptions, Decision, Noul, Score, ScoreLevels, Verdict};
 pub use wire::{Response, ResponseMeta, TraceConfig, Usage};

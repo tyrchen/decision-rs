@@ -146,6 +146,115 @@ impl Noul {
             None
         }
     }
+
+    /// A one-threshold alternative to [`Noul::decide`]: reads `P(yes)` as a
+    /// [`Verdict`] against a single `certainty` threshold, measured as distance from
+    /// the coin flip rather than as a raw probability.
+    ///
+    /// Where `decide(yes_at, no_at)` takes two independent thresholds — useful when
+    /// the cost of a false yes and a false no differ — `decide_verdict` takes one
+    /// symmetric threshold: `certainty = 0.8` accepts [`Verdict::Yes`] from `P(yes) >=
+    /// 0.9` and [`Verdict::No`] from `P(yes) <= 0.1`, leaving everything between them
+    /// [`Verdict::Unsure`]. `certainty = 0.0` never returns `Unsure` and splits at
+    /// `0.5`, matching [`Verdict::from_probability`]'s own default.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use jev::{Noul, Verdict};
+    ///
+    /// let noul = Noul::try_new(0.94).unwrap();
+    /// assert_eq!(noul.decide_verdict(0.8), Verdict::Yes);
+    ///
+    /// let ambiguous = Noul::try_new(0.55).unwrap();
+    /// assert_eq!(ambiguous.decide_verdict(0.8), Verdict::Unsure);
+    /// ```
+    #[must_use]
+    pub fn decide_verdict(&self, certainty: f64) -> Verdict {
+        Verdict::from_probability(self.probability, certainty)
+    }
+}
+
+impl std::fmt::Display for Noul {
+    /// Renders as a verdict with its certainty, e.g. `"yes, 88% sure"` or
+    /// `"no, 70% sure"`. See [`Verdict::from_probability`] for what "sure" measures.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let certainty = certainty_from_probability(self.probability);
+        let word = if self.probability >= 0.5 { "yes" } else { "no" };
+        write!(f, "{word}, {} sure", format_percent(certainty))
+    }
+}
+
+/// A yes/no judgment that may also come out undecided.
+///
+/// Where [`Noul::is_yes`]/[`Noul::is_no`] each take their own threshold, and
+/// [`Noul::decide`] takes two independent thresholds for an asymmetric risk
+/// tolerance, `Verdict` is the result of [`Noul::decide_verdict`]'s single symmetric
+/// threshold: a caller that falls back to non-AI behavior on an uncertain answer
+/// branches on this instead of comparing probabilities by hand.
+///
+/// # Examples
+///
+/// ```
+/// use jev::Verdict;
+///
+/// assert_eq!(Verdict::from_probability(0.94, 0.8), Verdict::Yes);
+/// assert_eq!(Verdict::from_probability(0.55, 0.8), Verdict::Unsure);
+/// assert_eq!(Verdict::from_probability(0.05, 0.8), Verdict::No);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Yes, at least as certain as the threshold asked for.
+    Yes,
+    /// Too close to the coin flip to call either way.
+    Unsure,
+    /// No, at least as certain as the threshold asked for.
+    No,
+}
+
+impl Verdict {
+    /// Reads a `P(yes)` probability as a `Verdict`, [`Verdict::Unsure`] below
+    /// `certainty`.
+    ///
+    /// `certainty` measures distance from the coin flip (`0.0..=1.0`), not a raw
+    /// probability: `0.8` accepts a yes from `P(yes) >= 0.9` and a no from `P(yes) <=
+    /// 0.1`. Both arguments are clamped into `0.0..=1.0` first, so a `certainty` above
+    /// `1.0` is treated as exactly `1.0`: `Unsure` for every probability except the
+    /// exact extremes `0.0` and `1.0`, rather than for every probability.
+    #[must_use]
+    pub fn from_probability(yes: f64, certainty: f64) -> Self {
+        let yes = yes.clamp(0.0, 1.0);
+        let certainty = certainty.clamp(0.0, 1.0);
+        let actual_certainty = certainty_from_probability(yes);
+        if actual_certainty < certainty {
+            Verdict::Unsure
+        } else if yes >= 0.5 {
+            Verdict::Yes
+        } else {
+            Verdict::No
+        }
+    }
+}
+
+impl std::fmt::Display for Verdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Verdict::Yes => "yes",
+            Verdict::Unsure => "unsure",
+            Verdict::No => "no",
+        })
+    }
+}
+
+/// The distance of `yes` from the coin flip (`0.5`), stretched to `0.0..=1.0`: `0.5`
+/// and `1.0` (or `0.0`) map to `0.0` and `1.0` respectively.
+fn certainty_from_probability(yes: f64) -> f64 {
+    2.0f64.mul_add(yes, -1.0).abs()
+}
+
+/// Renders a probability in `0.0..=1.0` as a whole-percent string, e.g. `"88%"`.
+fn format_percent(probability: f64) -> String {
+    format!("{:.0}%", probability * 100.0)
 }
 
 /// A `choice` answer, carrying the typed value alongside its raw probabilities.
@@ -251,11 +360,109 @@ impl<T: ChoiceOptions> Choice<T> {
         self.confidence.is_some_and(|c| c >= threshold)
     }
 
-    /// `Some(value)` when [`Self::confident`], else `None` — the caller's cue to
+    /// `Some(value)` when [`Self::accept`] confident, else `None` — the caller's cue to
     /// escalate to a human or a fallback path.
     #[must_use]
     pub fn accept(&self, threshold: f64) -> Option<&T> {
         self.confident(threshold).then(|| self.value())
+    }
+
+    /// Picks an option by its probability instead of by [`Self::value`]'s mode.
+    ///
+    /// Walks `T::options()` in declaration order, subtracting each option's
+    /// probability (`0.0` for an option [`Self::probability_of`] has no entry for)
+    /// from `roll`, and returns the option the roll lands in: an option the model
+    /// gave a fifth of the mass to comes up for a fifth of the rolls. This lets a
+    /// scene play out differently from one run to the next without ever picking an
+    /// option the model ruled out entirely.
+    ///
+    /// `roll` is a value in `0.0..=1.0` supplied by the caller, so the draw stays
+    /// reproducible (seeded from the caller's own RNG, a fixed test seed, or
+    /// anything else) and this crate stays free of a `rand` dependency. When `roll`
+    /// is outside `0.0..=1.0`, or the probabilities do not sum to at least `roll`
+    /// (for example because the server reported none), [`Self::value`] comes back.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use jev::{Choice, ChoiceOptions};
+    /// use indexmap::IndexMap;
+    ///
+    /// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    /// enum Team { Payments, Frontend }
+    /// impl ChoiceOptions for Team {
+    ///     fn options() -> &'static [(&'static str, &'static str)] {
+    ///         &[("payments", "Billing."), ("frontend", "UI.")]
+    ///     }
+    ///     fn from_key(key: &str) -> Option<Self> {
+    ///         match key { "payments" => Some(Team::Payments), "frontend" => Some(Team::Frontend), _ => None }
+    ///     }
+    ///     fn key(&self) -> &'static str {
+    ///         match self { Team::Payments => "payments", Team::Frontend => "frontend" }
+    ///     }
+    /// }
+    ///
+    /// let mut probabilities = IndexMap::new();
+    /// probabilities.insert("payments".to_string(), 0.7);
+    /// probabilities.insert("frontend".to_string(), 0.3);
+    /// let choice = Choice::<Team>::try_new("team", "payments", Some(0.7), probabilities).unwrap();
+    ///
+    /// assert_eq!(choice.sample(0.5), Team::Payments); // within the first 0.7
+    /// assert_eq!(choice.sample(0.9), Team::Frontend); // within the last 0.3
+    /// ```
+    /// # Panics
+    ///
+    /// Never panics for a `T` whose `ChoiceOptions` impl keeps `key()`/`from_key()`
+    /// consistent (guaranteed by `#[derive(ChoiceOptions)]`): `self.value.key()` is
+    /// always one of `T::options()`'s keys, so the fallback `T::from_key` always
+    /// succeeds. A hand-written `ChoiceOptions` impl that violates that contract is a
+    /// caller-side bug this method cannot recover from.
+    #[must_use]
+    pub fn sample(&self, roll: f64) -> T {
+        let mut remaining = roll;
+        for (key, _) in T::options() {
+            let probability = self.probabilities.get(*key).copied().unwrap_or(0.0);
+            remaining -= probability;
+            if remaining < 0.0 {
+                // `key` came from `T::options()`, so `from_key` always succeeds here.
+                if let Some(value) = T::from_key(key) {
+                    return value;
+                }
+            }
+        }
+        // Roll exceeded the total probability mass (or there was none reported):
+        // fall back to a value equivalent to the answer's own selection.
+        T::from_key(self.value.key()).unwrap_or_else(|| unreachable_choice_key(self.value.key()))
+    }
+}
+
+/// Panics: only reachable from a hand-written `ChoiceOptions` impl whose `key()` and
+/// `from_key()` disagree, which `#[derive(ChoiceOptions)]` never produces. See
+/// [`Choice::sample`]'s `# Panics` section.
+fn unreachable_choice_key<T>(key: &str) -> T {
+    panic!(
+        "ChoiceOptions::from_key({key:?}) must succeed: key() must return one of T::options()'s \
+         own keys"
+    )
+}
+
+impl<T: ChoiceOptions + std::fmt::Debug> std::fmt::Display for Choice<T> {
+    /// Renders as the selected option followed by the full distribution and
+    /// confidence, e.g. `"Payments (payments 88%, frontend 12%; confidence 82%)"`.
+    /// Probabilities are listed in `T::options()` declaration order.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?} (", self.value)?;
+        for (index, (key, _)) in T::options().iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            let probability = self.probabilities.get(*key).copied().unwrap_or(0.0);
+            write!(f, "{key} {}", format_percent(probability))?;
+        }
+        let confidence = self
+            .confidence
+            .map_or_else(|| "n/a".to_string(), format_percent);
+        write!(f, "; confidence {confidence})")
     }
 }
 
@@ -405,6 +612,31 @@ impl<T: ScoreLevels> Score<T> {
     #[must_use]
     pub fn confident(&self, threshold: f64) -> bool {
         self.confidence.is_some_and(|c| c >= threshold)
+    }
+}
+
+impl<T: ScoreLevels> std::fmt::Display for Score<T> {
+    /// Renders as the raw score followed by each level's probability and the
+    /// confidence, e.g. `"1.88 (harmless 0%, wary 12%, lethal 88%; confidence
+    /// 82%)"`. Levels are listed in `T::levels()` declaration order; a level with no
+    /// reported probability shows `0%`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:.2} (", self.raw)?;
+        for (index, level) in T::levels().iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            let probability = self
+                .probabilities
+                .get(&index.to_string())
+                .copied()
+                .unwrap_or(0.0);
+            write!(f, "{level} {}", format_percent(probability))?;
+        }
+        let confidence = self
+            .confidence
+            .map_or_else(|| "n/a".to_string(), format_percent);
+        write!(f, "; confidence {confidence})")
     }
 }
 
@@ -603,5 +835,121 @@ mod tests {
             let normalized = score.normalized();
             prop_assert!((0.0..=1.0).contains(&normalized));
         }
+    }
+
+    #[test]
+    fn test_should_compute_verdict_from_probability() {
+        assert_eq!(Verdict::from_probability(0.94, 0.8), Verdict::Yes);
+        assert_eq!(Verdict::from_probability(0.55, 0.8), Verdict::Unsure);
+        assert_eq!(Verdict::from_probability(0.05, 0.8), Verdict::No);
+    }
+
+    #[test]
+    fn test_should_never_return_unsure_for_zero_certainty_threshold() {
+        assert_eq!(Verdict::from_probability(0.51, 0.0), Verdict::Yes);
+        assert_eq!(Verdict::from_probability(0.49, 0.0), Verdict::No);
+    }
+
+    #[test]
+    fn test_should_return_unsure_for_non_extreme_probability_at_certainty_above_one() {
+        // Clamped threshold of 1.0 requires certainty == 1.0, achievable only at the
+        // probability extremes (exactly 0.0 or 1.0); anything else is Unsure.
+        assert_eq!(Verdict::from_probability(0.99, 1.5), Verdict::Unsure);
+        assert_eq!(Verdict::from_probability(0.01, 1.5), Verdict::Unsure);
+    }
+
+    #[test]
+    fn test_should_clamp_out_of_range_probability_for_verdict() {
+        assert_eq!(Verdict::from_probability(1.5, 0.0), Verdict::Yes);
+        assert_eq!(Verdict::from_probability(-0.5, 0.0), Verdict::No);
+    }
+
+    #[test]
+    fn test_should_derive_verdict_from_noul() {
+        let noul = Noul::try_new(0.94).unwrap();
+        assert_eq!(noul.decide_verdict(0.8), Verdict::Yes);
+        let ambiguous = Noul::try_new(0.55).unwrap();
+        assert_eq!(ambiguous.decide_verdict(0.8), Verdict::Unsure);
+    }
+
+    #[test]
+    fn test_should_display_verdict_as_lowercase_word() {
+        assert_eq!(Verdict::Yes.to_string(), "yes");
+        assert_eq!(Verdict::Unsure.to_string(), "unsure");
+        assert_eq!(Verdict::No.to_string(), "no");
+    }
+
+    #[test]
+    fn test_should_display_noul_as_verdict_with_certainty() {
+        let noul = Noul::try_new(0.94).unwrap();
+        assert_eq!(noul.to_string(), "yes, 88% sure");
+        let noul = Noul::try_new(0.15).unwrap();
+        assert_eq!(noul.to_string(), "no, 70% sure");
+    }
+
+    #[test]
+    fn test_should_sample_choice_within_first_probability_band() {
+        let mut probabilities = IndexMap::new();
+        probabilities.insert("payments".to_string(), 0.7);
+        probabilities.insert("frontend".to_string(), 0.3);
+        let choice = Choice::<Team>::try_new("team", "payments", Some(0.7), probabilities).unwrap();
+
+        assert_eq!(choice.sample(0.0), Team::Payments);
+        assert_eq!(choice.sample(0.69), Team::Payments);
+        assert_eq!(choice.sample(0.71), Team::Frontend);
+        assert_eq!(choice.sample(0.99), Team::Frontend);
+    }
+
+    #[test]
+    fn test_should_sample_choice_deterministically_for_same_roll() {
+        let mut probabilities = IndexMap::new();
+        probabilities.insert("payments".to_string(), 0.5);
+        probabilities.insert("frontend".to_string(), 0.5);
+        let choice = Choice::<Team>::try_new("team", "payments", None, probabilities).unwrap();
+
+        assert_eq!(choice.sample(0.3), choice.sample(0.3));
+    }
+
+    #[test]
+    fn test_should_fall_back_to_value_when_sample_roll_exceeds_probability_mass() {
+        // No probabilities reported at all: any roll falls back to `value()`.
+        let choice = Choice::<Team>::try_new("team", "payments", None, IndexMap::new()).unwrap();
+        assert_eq!(choice.sample(0.5), Team::Payments);
+        assert_eq!(choice.sample(1.5), Team::Payments);
+    }
+
+    #[test]
+    fn test_should_display_choice_with_ranked_probabilities_and_confidence() {
+        let mut probabilities = IndexMap::new();
+        probabilities.insert("payments".to_string(), 0.88);
+        probabilities.insert("frontend".to_string(), 0.12);
+        let choice =
+            Choice::<Team>::try_new("team", "payments", Some(0.82), probabilities).unwrap();
+        assert_eq!(
+            choice.to_string(),
+            "Payments (payments 88%, frontend 12%; confidence 82%)"
+        );
+    }
+
+    #[test]
+    fn test_should_display_choice_without_confidence_as_not_applicable() {
+        let choice = Choice::<Team>::try_new("team", "payments", None, IndexMap::new()).unwrap();
+        assert_eq!(
+            choice.to_string(),
+            "Payments (payments 0%, frontend 0%; confidence n/a)"
+        );
+    }
+
+    #[test]
+    fn test_should_display_score_with_level_probabilities_and_confidence() {
+        let mut probabilities = IndexMap::new();
+        probabilities.insert("0".to_string(), 0.0);
+        probabilities.insert("1".to_string(), 0.12);
+        probabilities.insert("2".to_string(), 0.88);
+        let score = Score::<Urgency>::try_new("urgency", 1.88, Some(0.82), probabilities).unwrap();
+        assert_eq!(
+            score.to_string(),
+            "1.88 (Low. 0%, Mid. 12%, High. 88%; confidence 82%)"
+        );
     }
 }

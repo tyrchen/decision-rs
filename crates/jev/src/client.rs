@@ -15,7 +15,7 @@ use crate::{
     model::Model,
     question::Questions,
     state::State,
-    typed::Decision,
+    typed::{Choice, ChoiceOptions, Decision, Noul, Score, ScoreLevels},
     util::estimate_tokens,
     wire::{DecisionRequest, Response, ResponseMeta, TraceConfig},
 };
@@ -141,17 +141,22 @@ impl<'a> RequestOptions<'a> {
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
-    api_key: SecretString,
+    api_key: Option<SecretString>,
     config: Arc<Config>,
 }
 
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let api_key: &dyn std::fmt::Debug = if self.api_key.is_some() {
+            &"[REDACTED]"
+        } else {
+            &"none"
+        };
         f.debug_struct("Client")
             .field("api_base", &self.api_base())
             .field("model", &self.config.model)
             .field("surface", &self.config.surface)
-            .field("api_key", &"[REDACTED]")
+            .field("api_key", api_key)
             // `http` is deliberately omitted: `reqwest::Client`'s own `Debug` output
             // is an internal connection-pool dump, not useful application diagnostics.
             .finish_non_exhaustive()
@@ -176,6 +181,43 @@ impl Client {
         )
     }
 
+    /// Builds a client that sends no `Authorization` header at all, for a System
+    /// One-compatible backend a caller hosts themselves.
+    ///
+    /// Some self-hosted backends (a local model server, a proxy that injects its
+    /// own credentials, a demo endpoint that takes no key) neither expect nor accept
+    /// a bearer token; every other `Client` constructor sends one unconditionally.
+    /// `base_url` may use `http://` for a loopback address without the opt-in
+    /// [`Client::with_api_base`] otherwise requires, since a backend a caller hosts
+    /// on their own machine is exactly the case that check exists to allow.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] when neither the `rustls-tls` nor `native-tls`
+    /// feature is enabled (see [`Client::new`]), or when `base_url` fails to parse
+    /// or uses a non-`https`, non-loopback scheme.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use jev::Client;
+    ///
+    /// # fn run() -> Result<(), jev::Error> {
+    /// let client = Client::without_api_key("http://127.0.0.1:8099")?;
+    /// # let _ = client;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn without_api_key(base_url: &str) -> Result<Self, Error> {
+        let http = build_http_client(Config::default().timeout)?;
+        let client = Self {
+            http,
+            api_key: None,
+            config: Arc::new(Config::default()),
+        };
+        client.with_api_base(base_url)
+    }
+
     /// Builds a client that shares a caller-owned `reqwest::Client` and connection
     /// pool. This is the right choice inside a service that already owns an HTTP
     /// client, and the only way to supply a custom TLS configuration (for example a
@@ -183,7 +225,7 @@ impl Client {
     pub fn with_http(http: reqwest::Client, api_key: impl Into<SecretString>) -> Self {
         Self {
             http,
-            api_key: api_key.into(),
+            api_key: Some(api_key.into()),
             config: Arc::new(Config::default()),
         }
     }
@@ -202,7 +244,7 @@ impl Client {
     ) -> Result<Self, Error> {
         Ok(Self {
             http,
-            api_key: api_key.into(),
+            api_key: Some(api_key.into()),
             config: Arc::new(config),
         })
     }
@@ -366,6 +408,136 @@ impl Client {
         self.send(RequestOptions::new(state), questions)
             .await
             .map(|(response, _)| response)
+    }
+
+    /// Single-question convenience: asks one `noul` question and returns the typed
+    /// [`Noul`] answer directly, without a [`Decision`] struct.
+    ///
+    /// For a one-off yes/no gate that does not warrant its own struct. For more than
+    /// one question in a single request, or to keep the question and its criteria
+    /// next to a named type, use `#[derive(Decision)]` or [`Client::ask`] instead.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] if `instructions` fails [`Questions`]'s validation (empty,
+    /// oversized); otherwise any [`Error`] from the underlying request.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn run(client: &jev::Client) -> Result<(), jev::Error> {
+    /// let is_refund = client.noul("Please refund my order.", "Is this a refund request?").await?;
+    /// println!("{is_refund}"); // Display: "yes, 88% sure"
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn noul(
+        &self,
+        state: impl Into<State>,
+        instructions: impl Into<crate::guidance::Guidance>,
+    ) -> Result<Noul, Error> {
+        const KEY: &str = "noul";
+        let questions = Questions::builder().noul(KEY, instructions).build()?;
+        let response = self.ask(state, &questions).await?;
+        Noul::try_new(response.answers.noul(KEY)?)
+    }
+
+    /// Single-question convenience: asks one `choice` question over `T::options()`
+    /// and returns the typed [`Choice<T>`] answer directly, without a [`Decision`]
+    /// struct.
+    ///
+    /// `T` supplies both the wire criteria (`T::options()`) and the typed result, the
+    /// same as a `Choice<T>` field on a `#[derive(Decision)]` struct would.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] if `instructions` fails validation; [`Error::UnknownChoice`]
+    /// if the server picks an option outside `T`; otherwise any [`Error`] from the
+    /// underlying request.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use jev::ChoiceOptions;
+    ///
+    /// #[derive(Debug, Clone, Copy, PartialEq, Eq, ChoiceOptions)]
+    /// enum Team {
+    ///     /// Billing issues.
+    ///     Payments,
+    ///     /// UI issues.
+    ///     Frontend,
+    /// }
+    ///
+    /// # async fn run(client: &jev::Client) -> Result<(), jev::Error> {
+    /// let team = client.choice::<Team>("a checkout ticket", "Which team owns this?").await?;
+    /// println!("{:?}", team.value());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn choice<T: ChoiceOptions>(
+        &self,
+        state: impl Into<State>,
+        instructions: impl Into<crate::guidance::Guidance>,
+    ) -> Result<Choice<T>, Error> {
+        const KEY: &str = "choice";
+        let questions = Questions::builder()
+            .choice(KEY, instructions, T::options().to_vec())
+            .build()?;
+        let response = self.ask(state, &questions).await?;
+        let answer = response.answers.choice(KEY)?;
+        Choice::try_new(
+            KEY,
+            &answer.choice,
+            answer.confidence,
+            answer.probabilities.clone(),
+        )
+    }
+
+    /// Single-question convenience: asks one `score` question over `T::levels()` and
+    /// returns the typed [`Score<T>`] answer directly, without a [`Decision`] struct.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] if `instructions` fails validation; [`Error::ScoreRange`] if
+    /// the server's score falls outside `T`'s levels; otherwise any [`Error`] from the
+    /// underlying request.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use jev::ScoreLevels;
+    ///
+    /// #[derive(Debug, Clone, Copy, PartialEq, Eq, ScoreLevels)]
+    /// enum Urgency {
+    ///     /// Can wait.
+    ///     Low,
+    ///     /// Blocking revenue.
+    ///     High,
+    /// }
+    ///
+    /// # async fn run(client: &jev::Client) -> Result<(), jev::Error> {
+    /// let urgency = client.score::<Urgency>("a checkout ticket", "How urgent is this?").await?;
+    /// println!("{:?}", urgency.nearest());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn score<T: ScoreLevels>(
+        &self,
+        state: impl Into<State>,
+        instructions: impl Into<crate::guidance::Guidance>,
+    ) -> Result<Score<T>, Error> {
+        const KEY: &str = "score";
+        let questions = Questions::builder()
+            .score(KEY, instructions, T::levels().to_vec())
+            .build()?;
+        let response = self.ask(state, &questions).await?;
+        let answer = response.answers.score(KEY)?;
+        Score::try_new(
+            KEY,
+            answer.score,
+            answer.confidence,
+            answer.probabilities.clone(),
+        )
     }
 
     /// Escape hatch: full request in ([`RequestOptions::with_questions`] required),
@@ -565,17 +737,17 @@ impl Client {
             reason: e.to_string(),
         })?;
 
-        let http_response = self
+        let mut request = self
             .http
             .post(url.clone())
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+        if let Some(api_key) = &self.api_key {
+            request = request.header(
                 reqwest::header::AUTHORIZATION,
-                format!("Bearer {}", self.api_key.expose_secret()),
-            )
-            .body(body)
-            .send()
-            .await?;
+                format!("Bearer {}", api_key.expose_secret()),
+            );
+        }
+        let http_response = request.body(body).send().await?;
 
         let status = http_response.status();
         let retry_after_secs = parse_retry_after(http_response.headers());
@@ -887,6 +1059,14 @@ mod tests {
         let debug = format!("{client:?}");
         assert!(!debug.contains("sk-super-secret"));
         assert!(debug.contains("REDACTED"));
+    }
+
+    #[test]
+    fn test_should_report_no_api_key_in_debug_output_for_without_api_key() {
+        let client = Client::without_api_key("http://127.0.0.1:8099").unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("none"));
+        assert!(!debug.contains("REDACTED"));
     }
 
     #[test]

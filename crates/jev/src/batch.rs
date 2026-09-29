@@ -1,6 +1,6 @@
-//! `decide_all`: a bounded-concurrency helper over many states, same questions.
+//! `decide_all` / `run_cases`: bounded-concurrency helpers over many states or cases.
 //!
-//! The API has no batch endpoint; this ships one helper instead of a fake batch
+//! The API has no batch endpoint; this ships helpers instead of a fake batch
 //! surface. Feature-gated behind `batch` so the `futures-util` dependency stays
 //! opt-in.
 
@@ -8,7 +8,13 @@ use std::num::NonZeroUsize;
 
 use futures_util::{StreamExt, stream};
 
-use crate::{client::Client, error::Error, state::State, typed::Decision};
+use crate::{
+    cases::{Case, CaseResult},
+    client::Client,
+    error::Error,
+    state::State,
+    typed::Decision,
+};
 
 /// Runs one decision per state with bounded concurrency, preserving input order.
 ///
@@ -47,6 +53,51 @@ pub async fn decide_all<D: Decision>(
 ) -> Vec<Result<D, Error>> {
     stream::iter(states)
         .map(|state| async move { client.decide::<D>(state).await })
+        .buffered(concurrency.get())
+        .collect()
+        .await
+}
+
+/// Runs many predefined [`Case`]s (see [`crate::CaseSet`]) with bounded concurrency,
+/// preserving input order.
+///
+/// The dynamic-path counterpart of [`decide_all`]: each case supplies its own state
+/// *and* questions (loaded from a config file rather than one [`Decision`] type
+/// applied to many states), so the result carries the case's `id` instead of a typed
+/// value. One failure does not discard the batch — the result at index `i`
+/// corresponds to `cases[i]`.
+///
+/// # Examples
+///
+/// ```no_run
+/// # async fn run() -> Result<(), jev::Error> {
+/// use std::num::NonZeroUsize;
+///
+/// use jev::{CaseSet, Client, run_cases};
+///
+/// let cases = CaseSet::from_json_str(r#"{"cases": [{
+///     "id": "ticket-001",
+///     "state": "a refund ticket",
+///     "questions": {"refund": {"type": "noul", "instructions": "Refund?"}}
+/// }]}"#)?;
+/// let client = Client::from_env()?;
+/// let results = run_cases(&client, cases.as_slice(), NonZeroUsize::new(4).unwrap()).await;
+/// for result in results {
+///     match result {
+///         Ok(case) => println!("{}: {:?}", case.id, case.response.answers),
+///         Err(err) => eprintln!("failed: {err}"),
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn run_cases(
+    client: &Client,
+    cases: &[Case],
+    concurrency: NonZeroUsize,
+) -> Vec<Result<CaseResult, Error>> {
+    stream::iter(cases)
+        .map(|case| async move { client.run_case(case).await })
         .buffered(concurrency.get())
         .collect()
         .await
@@ -112,5 +163,36 @@ mod tests {
         for result in results {
             assert!(result.is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn test_should_run_cases_preserving_order_and_ids() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/alpha/decisions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "model": "typesafe/jev-1.13",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "answers": {"flag": {"type": "noul", "noul": 0.9}}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = Client::with_http(reqwest::Client::new(), SecretString::from("key"))
+            .with_api_base(&server.uri())
+            .unwrap();
+
+        let case_set = crate::CaseSet::from_json_str(
+            r#"{"cases": [
+                {"id": "a", "state": "one", "questions": {"flag": {"type": "noul", "instructions": "Flagged?"}}},
+                {"id": "b", "state": "two", "questions": {"flag": {"type": "noul", "instructions": "Flagged?"}}}
+            ]}"#,
+        )
+        .unwrap();
+
+        let results = run_cases(&client, case_set.as_slice(), NonZeroUsize::new(2).unwrap()).await;
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].as_ref().unwrap().id, "a");
+        assert_eq!(results[1].as_ref().unwrap().id, "b");
     }
 }

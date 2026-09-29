@@ -75,6 +75,44 @@
 //! # }
 //! ```
 //!
+//! ## Predefined cases from YAML/JSON
+//!
+//! For a fixed batch of `(state, questions)` pairs — a fixture file of support
+//! tickets, a regression suite of prior decisions — [`CaseSet`] loads them from one
+//! YAML/JSON document instead of assembling each [`Questions`] value in code:
+//!
+//! ```
+//! use jev::CaseSet;
+//!
+//! let json = r#"{"cases": [{
+//!     "id": "ticket-001",
+//!     "state": "Customer wants a refund for a duplicate charge.",
+//!     "questions": {
+//!         "refund": {"type": "noul", "instructions": "Is the customer asking for money back?"}
+//!     }
+//! }]}"#;
+//! let cases = CaseSet::from_json_str(json).unwrap();
+//! # let _ = cases;
+//! ```
+//!
+//! ```no_run
+//! # #[cfg(feature = "yaml")]
+//! # async fn run() -> Result<(), jev::Error> {
+//! use jev::{CaseSet, Client};
+//!
+//! let cases = CaseSet::from_file("cases.yaml").await?;
+//! let client = Client::from_env()?;
+//! for case in &cases {
+//!     let result = client.run_case(case).await?;
+//!     println!("{}: {:?}", result.id, result.response.answers);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See [`CaseSet`]'s docs for the file format, and [`run_cases`] (behind the `batch`
+//! feature) for running the whole set with bounded concurrency.
+//!
 //! ## The dynamic path
 //!
 //! For question sets assembled at runtime from configuration, [`Questions::builder`]
@@ -110,7 +148,8 @@
 //! | `retry` | yes | Bounded retry loop honouring `Retry-After`. |
 //! | `rustls-tls` | yes | `reqwest` over `rustls` with the `aws-lc-rs` backend. |
 //! | `native-tls` | no | `reqwest` over the platform TLS stack. |
-//! | `batch` | no | [`decide_all`], a bounded-concurrency helper. |
+//! | `batch` | no | [`decide_all`] and [`run_cases`], bounded-concurrency helpers. |
+//! | `yaml` | no | [`CaseSet::from_yaml_str`] / [`CaseSet::from_file`] for `.yaml`/`.yml`. |
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs, missing_debug_implementations)]
@@ -119,6 +158,7 @@
 mod answer;
 #[cfg(feature = "batch")]
 mod batch;
+mod cases;
 mod client;
 mod config;
 mod error;
@@ -132,7 +172,8 @@ mod wire;
 
 pub use answer::{Answer, Answers, ChoiceAnswer, NoulAnswer, ScoreAnswer};
 #[cfg(feature = "batch")]
-pub use batch::decide_all;
+pub use batch::{decide_all, run_cases};
+pub use cases::{Case, CaseNoulCriteria, CaseQuestion, CaseResult, CaseSet};
 pub use client::{Client, Decided, RequestOptions};
 pub use config::{Config, RetryConfig, Surface, Thresholds};
 pub use error::Error;

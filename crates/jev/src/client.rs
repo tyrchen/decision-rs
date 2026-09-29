@@ -10,6 +10,7 @@ use tracing::{debug, instrument, warn};
 
 use crate::{
     answer::Answers,
+    cases::{Case, CaseResult},
     config::{Config, Surface},
     error::Error,
     model::Model,
@@ -540,6 +541,41 @@ impl Client {
         )
     }
 
+    /// Runs one predefined [`Case`]: builds its questions, sends its state, and
+    /// returns the response tagged with the case's `id`.
+    ///
+    /// This is the config-file counterpart of [`Client::ask`]: `ask` takes questions
+    /// assembled in code, `run_case` takes both the state and the questions from a
+    /// [`Case`] loaded via [`crate::CaseSet::from_yaml_str`] /
+    /// [`crate::CaseSet::from_json_str`] / [`crate::CaseSet::from_file`]. For many
+    /// cases at once with bounded concurrency, see [`crate::run_cases`] (the `batch`
+    /// feature).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] if `case.questions` fails validation (this should not
+    /// happen for a `Case` obtained from a successfully loaded [`crate::CaseSet`],
+    /// which validates eagerly at load time); otherwise any [`Error`] from the
+    /// underlying request.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn run(client: &jev::Client, case: &jev::Case) -> Result<(), jev::Error> {
+    /// let result = client.run_case(case).await?;
+    /// println!("{}: {:?}", result.id, result.response.answers);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn run_case(&self, case: &Case) -> Result<CaseResult, Error> {
+        let questions = case.build_questions()?;
+        let response = self.ask(case.state.clone(), &questions).await?;
+        Ok(CaseResult {
+            id: case.id.clone(),
+            response,
+        })
+    }
+
     /// Escape hatch: full request in ([`RequestOptions::with_questions`] required),
     /// full [`Response`] out.
     ///
@@ -1048,7 +1084,48 @@ fn unreachable_url() -> url::Url {
 
 #[cfg(test)]
 mod tests {
+    use secrecy::SecretString;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
     use super::*;
+    use crate::CaseSet;
+
+    #[tokio::test]
+    async fn test_should_run_case_and_tag_result_with_case_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/alpha/decisions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "model": "typesafe/jev-1.13",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "answers": {"refund": {"type": "noul", "noul": 0.9}}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = Client::with_http(reqwest::Client::new(), SecretString::from("key"))
+            .with_api_base(&server.uri())
+            .unwrap();
+
+        let cases = CaseSet::from_json_str(
+            r#"{"cases": [{
+                "id": "ticket-001",
+                "state": "a refund ticket",
+                "questions": {
+                    "refund": {"type": "noul", "instructions": "Refund?"}
+                }
+            }]}"#,
+        )
+        .unwrap();
+        let case = cases.iter().next().unwrap();
+
+        let result = client.run_case(case).await.unwrap();
+        assert_eq!(result.id, "ticket-001");
+        assert_eq!(result.response.answers.noul("refund").unwrap(), 0.9);
+    }
 
     #[test]
     fn test_should_redact_api_key_in_debug_output() {

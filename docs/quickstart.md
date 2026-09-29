@@ -63,7 +63,7 @@ three primitives answered in a single request.
 
 ## Run the bundled examples
 
-Eight runnable programs under `crates/jev/examples/`, easiest to most complex:
+Nine runnable programs under `crates/jev/examples/`, easiest to most complex:
 
 ```bash
 # 1. The smallest useful call: one yes/no question, no derive, no struct.
@@ -90,15 +90,20 @@ JEV_API_KEY=sk-... cargo run --example 07_batch_concurrent --features batch
 
 # 8. A self-hosted backend: no API key, a custom model, the systemOne surface.
 SELF_HOSTED_URL=http://127.0.0.1:8099 cargo run --example 08_self_hosted_backend
+
+# 9. Predefined cases loaded from a YAML fixture, run with bounded concurrency.
+JEV_API_KEY=sk-... cargo run --example 09_cases_from_file --features "batch yaml"
 ```
 
-All eight need the `derive` feature except #1 and #4 (on by default); #7 also needs
-`batch`. See each file's header comment for its exact invocation.
+All need the `derive` feature except #1, #4, and #9 (on by default); #7 and #9 also
+need `batch`; #9 also needs `yaml`. See each file's header comment for its exact
+invocation.
 
 ## Next steps
 
 - [primitives.md](./primitives.md) — `Noul`, `Choice<T>`, `Score<T>` in depth.
 - [thresholds.md](./thresholds.md) — how to pick and configure the numbers you pass to
   `is_yes`, `confident`, and friends.
+- [cases.md](./cases.md) — loading predefined `(state, questions)` cases from YAML/JSON.
 - [migration-from-prompt-and-parse.md](./migration-from-prompt-and-parse.md) — replacing
   a chat-model classification prompt.

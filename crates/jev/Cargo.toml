@@ -35,8 +35,12 @@ retry = ["tokio/time"]
 rustls-tls = ["reqwest/rustls"]
 ## `reqwest` over the platform TLS stack (OpenSSL / Secure Transport / SChannel).
 native-tls = ["reqwest/native-tls"]
-## `decide_all`, a bounded-concurrency helper over a slice of states. Pulls in `futures-util`.
+## `decide_all` / `run_cases`, bounded-concurrency helpers over a slice of states or
+## cases. Pulls in `futures-util`.
 batch = ["dep:futures-util"]
+## `CaseSet::from_yaml_str` / `CaseSet::from_file` for `.yaml`/`.yml` case files.
+## JSON case files need no feature: `serde_json` is always a dependency.
+yaml = ["dep:serde_norway"]
 
 [dependencies]
 futures-util = { workspace = true, optional = true }
@@ -46,8 +50,9 @@ reqwest = { workspace = true, features = ["json"] }
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_norway = { version = "0.9", optional = true }
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs"] }
 tracing.workspace = true
 url.workspace = true
 
@@ -89,6 +94,10 @@ required-features = ["derive", "batch"]
 [[example]]
 name = "08_self_hosted_backend"
 required-features = ["derive"]
+
+[[example]]
+name = "09_cases_from_file"
+required-features = ["batch", "yaml"]
 
 [[test]]
 name = "derive"

@@ -30,6 +30,10 @@ pub enum Error {
     #[error("request failed: {0}")]
     Http(#[from] reqwest::Error),
 
+    /// Reading a case file (see [`crate::CaseSet::from_file`]) failed.
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
     /// The API responded with a non-2xx status carrying a `{"error": {...}}` envelope.
     #[error("API error (HTTP {status}): {message}")]
     Api {
@@ -185,7 +189,8 @@ impl Error {
             | Error::ScoreRange { .. }
             | Error::Invalid { .. }
             | Error::StateTooLarge { .. }
-            | Error::MissingApiKey => false,
+            | Error::MissingApiKey
+            | Error::Io(_) => false,
         }
     }
 

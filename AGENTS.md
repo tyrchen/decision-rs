@@ -1,4 +1,4 @@
-# jev-rust
+# jev-typed
 
 IMPORTANT: Never enter plan mode automatically!!! Never enter plan mode automatically!!!
 

@@ -66,7 +66,7 @@ JSON needs no extra feature (`serde_json` is always a dependency). YAML needs th
 
 ```toml
 [dependencies]
-jev-rust = { version = "0.1", features = ["yaml"] }
+jev-typed = { version = "0.1", features = ["yaml"] }
 ```
 
 ```rust,no_run

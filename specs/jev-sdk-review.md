@@ -97,21 +97,21 @@ introduced by implementation:
   in `Cargo.toml` (the crate uses `let`-chains, stable since 1.88) and the toolchain to
   `1.97.1` in `rust-toolchain.toml`, but has not committed to an N-2 stable floor.
 
-## Package renamed to `jev-rust` (superseding the section below)
+## Package renamed to `jev-typed` (superseding the section below)
 
-The package was renamed from `jev` to **`jev-rust`** at the requester's direction, to
+The package was renamed from `jev` to **`jev-typed`** at the requester's direction, to
 match this repository's own name. The rename is package-name-only:
-`crates/jev/Cargo.toml` sets `[package] name = "jev-rust"` and `[lib] name = "jev"`,
+`crates/jev/Cargo.toml` sets `[package] name = "jev-typed"` and `[lib] name = "jev"`,
 so every `use jev::...` statement in this workspace and in any downstream consumer is
 unchanged — only the `[dependencies]` line in a consumer's `Cargo.toml` now reads
-`jev-rust = "0.1"` instead of `jev = "0.1"`. `jev-macros` is unaffected (its own name
+`jev-typed = "0.1"` instead of `jev = "0.1"`. `jev-macros` is unaffected (its own name
 was never taken) and its `dev-dependency` on the SDK crate was updated to the new
-workspace-dependency key (`jev-rust`).
+workspace-dependency key (`jev-typed`).
 
-**Checking crates.io while making this change surfaced that `jev-rust` is *also*
+**Checking crates.io while making this change surfaced that `jev-typed` is *also*
 already taken** (v0.1.0, unrelated: a third independent async client for the same
 TypeSafe API, with a builder-style `EvaluateRequest::new(state).question(id, Noul::new(...))`
-shape). So neither `jev` nor `jev-rust` is actually publishable to crates.io today —
+shape). So neither `jev` nor `jev-typed` is actually publishable to crates.io today —
 the rename satisfies "match the repository name" but does not, by itself, resolve a
 crates.io publish. The three options in the superseded section below still apply,
 now against two taken names instead of one; a crates.io release under either identity
@@ -124,7 +124,7 @@ exhaustively since renaming was not the ask this pass).
 ## Superseded: original blocking issue for a real crates.io publish
 
 *(Written when the package was still named `jev`; kept for history. See the section
-above for the current state after the rename to `jev-rust`.)*
+above for the current state after the rename to `jev-typed`.)*
 
 **The name `jev` is already taken on crates.io** (v0.1.2, unrelated: a blocking/async
 client for "the TypeSafe System One HTTP API" with a materially different API shape—
@@ -156,7 +156,7 @@ At the same time as the rename, the public interface of an independent, mature R
 client for the same API — [`porky11/jev`](https://gitlab.com/porky11/jev) (published as
 crates.io `jev` v0.1.2, the crate that occupies the name above) — was studied for
 interface ideas. Three ergonomic patterns from that crate (and, for the sampling idea,
-echoed by a third independent client, crates.io `jev-rust` v0.1.0) were adopted, each
+echoed by a third independent client, crates.io `jev-typed` v0.1.0) were adopted, each
 as an *addition* that composes with the existing typed/dynamic layering rather than a
 replacement:
 
@@ -180,7 +180,7 @@ replacement:
    returning the typed `T` rather than a string key.
 
 Also adopted, addressing a real gap the prior-art review surfaced (both `porky11/jev`
-and the third `jev-rust` client support an API key-less, self-hosted backend; this SDK
+and the third `jev-typed` client support an API key-less, self-hosted backend; this SDK
 did not):
 
 4. **`Client::local` / an unauthenticated constructor.** For a System One-compatible
@@ -224,16 +224,16 @@ their content is materially unchanged beyond the header comment's invocation lin
 The five new programs each demonstrate one concept in isolation rather than
 re-explaining the whole SDK:
 
-| # | File | Concept | Features |
-|---|---|---|---|
-| 1 | `01_single_question.rs` | `Client::noul`: one question, no derive, no struct. | none |
-| 2 | `02_single_typed_choice_and_score.rs` | `Client::choice::<T>`/`Client::score::<T>`: one derived enum, still no `Decision`. | `derive` |
-| 3 | `03_multi_question_decision.rs` | `#[derive(Decision)]`: **multiple questions from one API call** (the design doc's headline case). | `derive` |
-| 4 | `04_dynamic_questions.rs` | `Questions::builder()`: config-driven questions built at runtime. | none |
-| 5 | `05_thresholds_and_escalation.rs` | `Thresholds`, `Verdict`/`decide_verdict`, `accept`: escalating ambiguity instead of guessing. | `derive` |
-| 6 | `06_weighted_sampling.rs` | `Choice::sample`: reproducible weighted sampling for games/simulations. | `derive` |
-| 7 | `07_batch_concurrent.rs` | `decide_all`: bounded-concurrency batching over many states. | `derive`, `batch` |
-| 8 | `08_self_hosted_backend.rs` | `Client::without_api_key`, `Model::Custom`, `Surface::SystemOne`: a self-hosted backend. | `derive` |
+| #   | File                                  | Concept                                                                                           | Features          |
+| --- | ------------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------- |
+| 1   | `01_single_question.rs`               | `Client::noul`: one question, no derive, no struct.                                               | none              |
+| 2   | `02_single_typed_choice_and_score.rs` | `Client::choice::<T>`/`Client::score::<T>`: one derived enum, still no `Decision`.                | `derive`          |
+| 3   | `03_multi_question_decision.rs`       | `#[derive(Decision)]`: **multiple questions from one API call** (the design doc's headline case). | `derive`          |
+| 4   | `04_dynamic_questions.rs`             | `Questions::builder()`: config-driven questions built at runtime.                                 | none              |
+| 5   | `05_thresholds_and_escalation.rs`     | `Thresholds`, `Verdict`/`decide_verdict`, `accept`: escalating ambiguity instead of guessing.     | `derive`          |
+| 6   | `06_weighted_sampling.rs`             | `Choice::sample`: reproducible weighted sampling for games/simulations.                           | `derive`          |
+| 7   | `07_batch_concurrent.rs`              | `decide_all`: bounded-concurrency batching over many states.                                      | `derive`, `batch` |
+| 8   | `08_self_hosted_backend.rs`           | `Client::without_api_key`, `Model::Custom`, `Surface::SystemOne`: a self-hosted backend.          | `derive`          |
 
 All eight compile under `cargo build --all-features --examples` and are covered by
 `cargo clippy --all-targets --all-features -- -D warnings` (and a clean pedantic
@@ -242,4 +242,3 @@ need `JEV_API_KEY`/`OPENROUTER_API_KEY` to actually run (per `Client::from_env`)
 and #8 needs a real System One-compatible backend listening at `SELF_HOSTED_URL`.
 `[[example]]` entries with `required-features` were added to `crates/jev/Cargo.toml`
 for every example that needs `derive` and/or `batch`, matching the existing pattern.
-

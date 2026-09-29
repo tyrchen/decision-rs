@@ -1,5 +1,5 @@
 [package]
-name = "jev-rust"
+name = "jev-typed"
 description = "Typed Rust SDK for the Jev decision model: noul/choice/score primitives as types."
 categories = ["asynchronous", "web-programming::http-client", "api-bindings"]
 keywords = ["jev", "openrouter", "llm", "decision", "async"]
@@ -14,7 +14,7 @@ readme = "README.md"
 rust-version.workspace = true
 
 [lib]
-## The package is `jev-rust` (crates.io: `jev` and `jev-rust` were both already
+## The package is `jev-typed` (crates.io: `jev` and `jev-typed` were both already
 ## taken by unrelated crates at the time this SDK was written); the library
 ## itself is still named `jev`, so every `use jev::...` in this workspace's own
 ## code, and in any downstream consumer, is unaffected by the package rename.
@@ -60,7 +60,11 @@ url.workspace = true
 proptest.workspace = true
 rstest.workspace = true
 serde_norway = "0.9"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+tokio = { workspace = true, features = [
+  "rt-multi-thread",
+  "macros",
+  "test-util",
+] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 trybuild.workspace = true
 wiremock.workspace = true

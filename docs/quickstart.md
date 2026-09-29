@@ -4,11 +4,11 @@
 
 ```toml
 [dependencies]
-jev-rust = "0.1"
+jev-typed = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-The package is `jev-rust` on crates.io (the library itself is still named `jev`,
+The package is `jev-typed` on crates.io (the library itself is still named `jev`,
 so every `use jev::...` in your code stays the same — only the `[dependencies]`
 line names the package).
 

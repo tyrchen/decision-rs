@@ -7,22 +7,22 @@ version = "0.1.0"
 authors = ["Tyr Chen <tyr.chen@gmail.com>"]
 edition = "2024"
 license = "MIT"
-documentation = "https://docs.rs/jev-rust"
-repository = "https://github.com/tyrchen/jev-rust"
-homepage = "https://github.com/tyrchen/jev-rust"
+documentation = "https://docs.rs/jev-typed"
+repository = "https://github.com/tyrchen/jev-typed"
+homepage = "https://github.com/tyrchen/jev-typed"
 readme = "README.md"
 rust-version = "1.90"
 
 [workspace.dependencies]
 # jev workspace crates
-# Package name is `jev-rust` (crates.io: `jev` and `jev-rust` were both already
+# Package name is `jev-typed` (crates.io: `jev` and `jev-typed` were both already
 # taken by unrelated crates); the library itself is still named `jev` via
 # `[lib] name` in crates/jev/Cargo.toml, so downstream `use jev::...` is unaffected.
-jev-rust = { path = "crates/jev", version = "0.1.0", default-features = false }
+jev-typed = { path = "crates/jev", version = "0.1.0", default-features = false }
 jev-macros = { path = "crates/jev-macros", version = "0.1.0" }
 
 # shared third-party dependencies
-anyhow = "1.0.102"
+anyhow = "1.0.104"
 darling = "0.24"
 futures-util = { version = "0.3.34", default-features = false }
 heck = "0.5"
@@ -33,10 +33,17 @@ quote = "1.0.47"
 reqwest = { version = "0.13", default-features = false }
 rstest = "0.27"
 secrecy = "0.10.3"
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-syn = { version = "3.0", features = ["derive", "parsing", "printing", "clone-impls", "proc-macro", "extra-traits"] }
-thiserror = "2.0.18"
+syn = { version = "3.0", features = [
+  "derive",
+  "parsing",
+  "printing",
+  "clone-impls",
+  "proc-macro",
+  "extra-traits",
+] }
+thiserror = "2.0.21"
 tokio = "1.53"
 tracing = "0.1.44"
 tracing-subscriber = "0.3"

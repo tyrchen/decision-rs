@@ -13,7 +13,7 @@ lint:
 	@cargo clippy --workspace --all-targets --all-features --tests --benches -- -D warnings
 
 feature-check:
-	@cargo hack --feature-powerset check -p jev-rust
+	@cargo hack --feature-powerset check -p jev-typed
 
 audit:
 	@cargo audit

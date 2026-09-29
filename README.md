@@ -1,6 +1,6 @@
-![](https://github.com/tyrchen/jev-rust/workflows/build/badge.svg)
+![](https://github.com/tyrchen/jev-typed/workflows/build/badge.svg)
 
-# jev-rust
+# jev-typed
 
 A typed, third-party Rust SDK for the [Jev](https://openrouter.ai/docs/guides/community/jev)
 decision model. Jev is a *System One* model: instead of prose it answers typed
@@ -68,12 +68,12 @@ instructions, and `cargo doc` shows a reviewer precisely what the model is asked
 
 ## Crates
 
-| Crate (package name on crates.io) | Description |
-|---|---|
-| [`jev-rust`](crates/jev) (library: `jev`) | The SDK: wire types, dynamic question builder, typed `Decision`/`ChoiceOptions`/`ScoreLevels` traits, async `Client` with retry, `Thresholds` config. |
-| [`jev-macros`](crates/jev-macros) | `#[derive(Decision, ChoiceOptions, ScoreLevels)]`, re-exported from `jev` behind the `derive` feature (default on). |
+| Crate (package name on crates.io)          | Description                                                                                                                                           |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`jev-typed`](crates/jev) (library: `jev`) | The SDK: wire types, dynamic question builder, typed `Decision`/`ChoiceOptions`/`ScoreLevels` traits, async `Client` with retry, `Thresholds` config. |
+| [`jev-macros`](crates/jev-macros)          | `#[derive(Decision, ChoiceOptions, ScoreLevels)]`, re-exported from `jev` behind the `derive` feature (default on).                                   |
 
-The package is named `jev-rust` because `jev` was already taken on crates.io by
+The package is named `jev-typed` because `jev` was already taken on crates.io by
 an unrelated crate; the library itself keeps the name `jev` via `[lib] name`,
 so `use jev::...` is exactly what application code writes regardless of the
 package name in `Cargo.toml`.
@@ -101,13 +101,13 @@ package name in `Cargo.toml`.
   production. Select `Model::Latest` explicitly for exploratory work.
 - **Feature flags** (`jev` crate):
 
-  | Feature | Default | Effect |
-  |---|---|---|
-  | `derive` | yes | `#[derive(Decision, ChoiceOptions, ScoreLevels)]`. |
-  | `retry` | yes | Bounded retry loop honouring `Retry-After`. |
-  | `rustls-tls` | yes | `reqwest` over `rustls` with the `aws-lc-rs` backend. |
-  | `native-tls` | no | `reqwest` over the platform TLS stack. |
-  | `batch` | no | `decide_all`, a bounded-concurrency helper. |
+  | Feature      | Default | Effect                                                |
+  | ------------ | ------- | ----------------------------------------------------- |
+  | `derive`     | yes     | `#[derive(Decision, ChoiceOptions, ScoreLevels)]`.    |
+  | `retry`      | yes     | Bounded retry loop honouring `Retry-After`.           |
+  | `rustls-tls` | yes     | `reqwest` over `rustls` with the `aws-lc-rs` backend. |
+  | `native-tls` | no      | `reqwest` over the platform TLS stack.                |
+  | `batch`      | no      | `decide_all`, a bounded-concurrency helper.           |
 
 ## Development
 

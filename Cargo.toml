@@ -1,23 +1,49 @@
 [workspace]
-members = ["crates/*", "apps/*"]
+members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
-authors = ["Your Name <YourName@yourdomain.com>"]
+authors = ["Tyr Chen <tyr.chen@gmail.com>"]
 edition = "2024"
 license = "MIT"
-documentation = "https://docs.rs/"
-repository = "https://github.com/TODO"
-homepage = "https://github.com/TODO"
+documentation = "https://docs.rs/jev"
+repository = "https://github.com/tyrchen/jev-rust"
+homepage = "https://github.com/tyrchen/jev-rust"
 readme = "README.md"
+rust-version = "1.90"
 
 [workspace.dependencies]
-anyhow = "1.0.102"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.142"
-thiserror = "2.0.18"
-tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros"] }
+# jev workspace crates
+jev = { path = "crates/jev", version = "0.1.0", default-features = false }
+jev-macros = { path = "crates/jev-macros", version = "0.1.0" }
 
-# workspace crates
-jev-rust-core = { path = "crates/core" }
+# shared third-party dependencies
+anyhow = "1.0.102"
+darling = "0.24"
+futures-util = { version = "0.3.34", default-features = false }
+heck = "0.5"
+indexmap = { version = "2.14", features = ["serde"] }
+proc-macro2 = "1.0.107"
+proptest = "1.11"
+quote = "1.0.47"
+reqwest = { version = "0.13", default-features = false }
+rstest = "0.27"
+secrecy = "0.10.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.151"
+syn = { version = "3.0", features = ["derive", "parsing", "printing", "clone-impls", "proc-macro", "extra-traits"] }
+thiserror = "2.0.18"
+tokio = "1.53"
+tracing = "0.1.44"
+tracing-subscriber = "0.3"
+trybuild = "1.0"
+url = { version = "2.5", features = ["serde"] }
+wiremock = "0.6"
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[profile.dev]
+opt-level = 0

@@ -1,0 +1,5 @@
+error: variant `Frontend` has no doc comment; its `///` text is the option's criteria and is required
+ --> tests/derive-fail/missing_variant_doc.rs:8:5
+  |
+8 |     Frontend,
+  |     ^^^^^^^^

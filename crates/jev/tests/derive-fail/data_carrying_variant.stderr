@@ -1,0 +1,6 @@
+error: variants must be fieldless (data-carrying variants cannot be sent as criteria text)
+ --> tests/derive-fail/data_carrying_variant.rs:8:5
+  |
+8 | /     /// UI issues, with a ticket number.
+9 | |     Frontend(u32),
+  | |_________________^

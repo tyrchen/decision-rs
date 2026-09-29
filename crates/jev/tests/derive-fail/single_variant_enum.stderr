@@ -1,0 +1,5 @@
+error: `OnlyOne` must have at least 2 variants; a single-variant enum cannot express a choice or a scale
+ --> tests/derive-fail/single_variant_enum.rs:5:6
+  |
+5 | enum OnlyOne {
+  |      ^^^^^^^

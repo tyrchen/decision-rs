@@ -1,0 +1,5 @@
+error: duplicate option key `same`; every variant must have a distinct wire key
+  --> tests/derive-fail/duplicate_keys.rs:11:5
+   |
+11 |     Frontend,
+   |     ^^^^^^^^

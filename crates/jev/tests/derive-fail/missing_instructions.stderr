@@ -1,0 +1,5 @@
+error: field has no doc comment and no `#[jev(instructions = "...")]`; an instruction-less question is a guaranteed HTTP 400
+ --> tests/derive-fail/missing_instructions.rs:6:5
+  |
+6 |     flag: Noul,
+  |     ^^^^

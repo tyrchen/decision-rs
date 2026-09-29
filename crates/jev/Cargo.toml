@@ -1,0 +1,81 @@
+[package]
+name = "jev"
+description = "Typed Rust SDK for the Jev decision model: noul/choice/score primitives as types."
+categories = ["asynchronous", "web-programming::http-client", "api-bindings"]
+keywords = ["jev", "openrouter", "llm", "decision", "async"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["derive", "retry", "rustls-tls"]
+## Re-exports `#[derive(Decision, ChoiceOptions, ScoreLevels)]` from `jev-macros`.
+derive = ["jev-macros"]
+## Bounded retry loop honouring `Retry-After`. Pulls in `tokio` (`time` feature).
+retry = ["tokio/time"]
+## `reqwest` over `rustls` with the `aws-lc-rs` crypto backend (pure Rust).
+rustls-tls = ["reqwest/rustls"]
+## `reqwest` over the platform TLS stack (OpenSSL / Secure Transport / SChannel).
+native-tls = ["reqwest/native-tls"]
+## `decide_all`, a bounded-concurrency helper over a slice of states. Pulls in `futures-util`.
+batch = ["dep:futures-util"]
+
+[dependencies]
+futures-util = { workspace = true, optional = true }
+indexmap.workspace = true
+jev-macros = { workspace = true, optional = true }
+reqwest = { workspace = true, features = ["json"] }
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rstest.workspace = true
+serde_norway = "0.9"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+trybuild.workspace = true
+wiremock.workspace = true
+
+[[example]]
+name = "triage"
+required-features = ["derive"]
+
+[[example]]
+name = "dynamic"
+
+[[example]]
+name = "batch"
+required-features = ["derive", "batch"]
+
+[[test]]
+name = "derive"
+required-features = ["derive"]
+
+[[test]]
+name = "live"
+required-features = ["derive"]
+
+[[test]]
+name = "wire"
+required-features = ["derive"]
+
+[lints.rust]
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unsafe_code = "forbid"

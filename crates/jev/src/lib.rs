@@ -75,6 +75,29 @@
 //! # }
 //! ```
 //!
+//! ## Providers and API keys
+//!
+//! Construct a client with a key loaded by your application:
+//!
+//! ```no_run
+//! # fn run(openrouter_key: String, typesafe_key: String) -> Result<(), jev::Error> {
+//! let openrouter = jev::Client::openrouter(openrouter_key)?;
+//! let typesafe = jev::Client::typesafe(typesafe_key)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! [`Client::new`] defaults to `OpenRouter`. [`Client::for_provider`] accepts a
+//! runtime [`Provider`]; [`Config::provider`] supports YAML configuration.
+//! `TypeSafe` uses `/v1/systemone` with `jev-1.13.0` for the pinned default model,
+//! and `jev-latest` for [`Model::Latest`]. `OpenRouter` retains its existing paths
+//! and model IDs. Custom model IDs are never rewritten.
+//!
+//! [`Client::from_env`] reads `JEV_PROVIDER=openrouter|typesafe` when set and
+//! uses `JEV_API_KEY` or the selected provider's key variable. Without an explicit
+//! provider, key precedence is `JEV_API_KEY` (`OpenRouter`), `OPENROUTER_API_KEY`,
+//! then `TYPESAFE_API_KEY` (`TypeSafe`).
+//!
 //! ## Predefined cases from YAML/JSON
 //!
 //! For a fixed batch of `(state, questions)` pairs — a fixture file of support
@@ -164,6 +187,7 @@ mod config;
 mod error;
 mod guidance;
 mod model;
+mod provider;
 mod question;
 mod state;
 mod typed;
@@ -181,6 +205,7 @@ pub use guidance::Guidance;
 #[cfg(feature = "derive")]
 pub use jev_macros::{ChoiceOptions, Decision, ScoreLevels};
 pub use model::{DEFAULT_MODEL, Model};
+pub use provider::Provider;
 pub use question::{NoulCriteria, Question, Questions, QuestionsBuilder};
 pub use state::State;
 pub use typed::{Choice, ChoiceOptions, Decision, Noul, Score, ScoreLevels, Verdict};

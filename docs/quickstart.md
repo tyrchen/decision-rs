@@ -4,7 +4,7 @@
 
 ```toml
 [dependencies]
-jev-typed = "0.1"
+jev-typed = "0.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -20,7 +20,47 @@ supply your own `reqwest::Client`).
 
 ## Get an API key
 
-Jev is served through [OpenRouter](https://openrouter.ai). Set one of:
+Jev is served through [OpenRouter](https://openrouter.ai) and the
+[TypeSafe AI direct API](https://docs.typesafe.ai/introduction/quickstart).
+Use the API key issued by the provider you select.
+
+### Create a client with a key
+
+Pass an API key loaded by your application directly into the constructor:
+
+```rust,no_run
+use jev::{Client, Provider};
+
+let openrouter = Client::openrouter(openrouter_key)?;
+let typesafe = Client::typesafe(typesafe_key)?;
+let selected = Client::for_provider(Provider::TypeSafe, key)?;
+```
+
+`Client::new(key)` remains shorthand for `Client::openrouter(key)`. Constructors
+accept `&str`, `String`, or `secrecy::SecretString`. Keys are redacted in `Debug`
+output; empty keys, whitespace, non-ASCII bytes, and keys over 4096 bytes are
+rejected without including the key in the error.
+
+| Provider | Default endpoint | Pinned model | `Model::Latest` |
+|---|---|---|---|
+| OpenRouter | `https://openrouter.ai/api/alpha/decisions` | `typesafe/jev-1.13` | `~typesafe/jev-latest` |
+| TypeSafe AI | `https://api.typesafe.ai/v1/systemone` | `jev-1.13.0` | `jev-latest` |
+
+The endpoint and model conventions follow the
+[OpenRouter guide](https://openrouter.ai/blog/insights/what-is-jev/) and
+[TypeSafe model reference](https://docs.typesafe.ai/models).
+TypeSafe always uses System One and omits `session_id`, `user`, and `trace`.
+Custom model IDs are passed through unchanged. A custom base URL overrides the
+host while retaining the selected provider's endpoint path.
+
+For a shared HTTP pool, use `Client::with_http(http, key).with_provider(provider)`.
+That constructor validates the key when a request is sent. For YAML configuration,
+set `provider: typesafe` (default: `openrouter`) and pass the key separately to
+`Client::from_config(http, key, config)`; keys are never stored in `Config`.
+
+### Create a client from environment variables
+
+For OpenRouter, set one of:
 
 ```bash
 export JEV_API_KEY=sk-...
@@ -28,9 +68,20 @@ export JEV_API_KEY=sk-...
 export OPENROUTER_API_KEY=sk-...
 ```
 
-`Client::from_env()` reads `JEV_API_KEY` first, then falls back to
-`OPENROUTER_API_KEY`. An optional `JEV_BASE_URL` overrides the API base (mainly
-useful for pointing at a mock server in tests).
+For TypeSafe AI:
+
+```bash
+export JEV_PROVIDER=typesafe
+export TYPESAFE_API_KEY=your-key
+```
+
+`Client::from_env()` supports `JEV_PROVIDER=openrouter|typesafe`. With an explicit
+provider it reads `JEV_API_KEY` first, then only that provider's key variable;
+it never falls back to the other provider's key. Without `JEV_PROVIDER`, it tries
+`JEV_API_KEY` (OpenRouter), `OPENROUTER_API_KEY`, then `TYPESAFE_API_KEY` (TypeSafe).
+This preserves existing OpenRouter configurations and selects TypeSafe when only
+`TYPESAFE_API_KEY` is set. Set `JEV_PROVIDER` when both providers are configured.
+An optional `JEV_BASE_URL` overrides the API base (mainly useful for local mocks).
 
 ## Your first decision
 

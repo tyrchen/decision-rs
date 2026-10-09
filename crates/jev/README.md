@@ -29,6 +29,12 @@ async fn main() -> Result<(), jev::Error> {
 }
 ```
 
+Create a client directly with the matching provider's key using
+`Client::openrouter(key)?` or `Client::typesafe(key)?`. `Client::new(key)?` defaults
+to OpenRouter. Environment-based construction also supports `TYPESAFE_API_KEY`
+and `JEV_PROVIDER=openrouter|typesafe`; see the
+[quickstart](../../docs/quickstart.md#get-an-api-key) for the selection rules.
+
 ## Feature flags
 
 | Feature      | Default | Effect                                                                                             |

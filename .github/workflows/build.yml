@@ -38,22 +38,20 @@ jobs:
           fetch-depth: 0
           submodules: recursive
       - name: Install Rust
-        run: rustup toolchain install stable --component llvm-tools-preview
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        run: |
+          rustup show
+          rustup toolchain install nightly --profile minimal --component rustfmt
       - name: install nextest
         uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
       # - name: Install Protoc
       #   uses: arduino/setup-protoc@v2
-      - name: Check code format
-        run: cargo fmt --all -- --check
       - name: Check the package for errors
         run: cargo check --all
-      - name: Lint rust sources
-        run: cargo clippy --all-targets --all-features --tests --benches -- -D warnings
+      - name: Check formatting and lint rust sources
+        run: make lint
       - name: Execute rust tests
-        run: cargo nextest run --all-features
+        run: make test
       - name: Generate a changelog
         uses: orhun/git-cliff-action@v4
         id: git-cliff

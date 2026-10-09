@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use crate::{
     error::Error,
     model::{DEFAULT_MODEL, Model},
+    provider::Provider,
 };
 
 /// Default per-request timeout.
@@ -268,10 +269,12 @@ impl<'de> Deserialize<'de> for Thresholds {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Config {
+    /// The hosted provider. Defaults to `OpenRouter`; `TypeSafe` always uses System One.
+    pub provider: Provider,
     /// The model to request. Defaults to [`crate::DEFAULT_MODEL`].
     #[serde(with = "model_as_string")]
     pub model: Model,
-    /// The HTTP surface to call.
+    /// The `OpenRouter` HTTP surface to call. `TypeSafe` always uses System One.
     pub surface: Surface,
     /// Override for the API base URL (scheme + host), mainly for tests.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -298,6 +301,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            provider: Provider::default(),
             model: DEFAULT_MODEL,
             surface: Surface::default(),
             api_base: None,
@@ -335,6 +339,7 @@ mod tests {
     fn test_should_default_config_to_pinned_model_and_decisions_surface() {
         let config = Config::default();
         assert_eq!(config.model, DEFAULT_MODEL);
+        assert_eq!(config.provider, Provider::OpenRouter);
         assert_eq!(config.surface, Surface::Decisions);
         assert!(config.context_check);
     }

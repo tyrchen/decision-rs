@@ -314,7 +314,7 @@ impl CaseSet {
     /// Whether there are no cases.
     ///
     /// Never `true` for a successfully loaded `CaseSet`: loading rejects an empty
-    /// `cases` list (see [`MIN_CASES`]). Provided for API symmetry with
+    /// `cases` list. Provided for API symmetry with
     /// [`Vec::is_empty`] and to satisfy `clippy::len_without_is_empty`.
     #[must_use]
     pub fn is_empty(&self) -> bool {

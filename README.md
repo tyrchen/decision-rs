@@ -49,7 +49,7 @@ enum Urgency {
 
 #[tokio::main]
 async fn main() -> Result<(), jev::Error> {
-    let client = Client::from_env()?;                          // reads JEV_API_KEY
+    let client = Client::from_env()?;                          // chooses provider and key
     let triage: Triage = client.decide("a customer ticket...").await?;
 
     if triage.is_bug.is_yes(0.9) {
@@ -65,6 +65,17 @@ async fn main() -> Result<(), jev::Error> {
 The doc comments *are* the prompt: the `///` that documents the Rust item is the
 exact text the model reads. There is no second, drifting copy of the
 instructions, and `cargo doc` shows a reviewer precisely what the model is asked.
+
+Create a client with your provider's key directly:
+
+```rust,no_run
+let openrouter = jev::Client::openrouter(openrouter_key)?;
+let typesafe = jev::Client::typesafe(typesafe_key)?;
+```
+
+`Client::new(key)` defaults to OpenRouter. `Client::from_env()` also supports
+`TYPESAFE_API_KEY` and explicit `JEV_PROVIDER=openrouter|typesafe`; see the
+[quickstart](docs/quickstart.md#get-an-api-key) for selection rules and YAML configuration.
 
 ## Crates
 
@@ -118,6 +129,8 @@ make test-live       # ignored live tests; needs JEV_API_KEY
 make lint            # cargo +nightly fmt --check && cargo clippy -D warnings
 make feature-check   # cargo hack --feature-powerset check -p jev
 make audit           # cargo audit && cargo deny check
+make publish-check   # verify both crate archives without uploading
+make publish         # publish both crates to crates.io
 ```
 
 ## Agent support

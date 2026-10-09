@@ -321,14 +321,15 @@ fn build_question_entry(field: &ResolvedField<'_>) -> TokenStream {
 
     match &field.kind {
         FieldKind::Noul => {
-            let criteria = match (&field.yes, &field.no) {
-                (Some(yes), Some(no)) => quote! {
+            let criteria = if let (Some(yes), Some(no)) = (&field.yes, &field.no) {
+                quote! {
                     ::std::option::Option::Some(::jev::NoulCriteria {
                         r#true: ::jev::Guidance::from(#yes),
                         r#false: ::jev::Guidance::from(#no),
                     })
-                },
-                _ => quote! { ::std::option::Option::None },
+                }
+            } else {
+                quote! { ::std::option::Option::None }
             };
             quote! {
                 (

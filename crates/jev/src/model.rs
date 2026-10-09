@@ -22,6 +22,8 @@ const KNOWN_MODEL_CONTEXT_TOKENS: usize = 32_000;
 /// Decisions surface expects an author-namespaced ID (`typesafe/jev-1.13`), while the
 /// System One surface accepts and returns bare IDs (`jev-1.13`). Use
 /// [`Model::wire_id`] to get the ID to send for a given [`Surface`].
+/// [`crate::Client`] additionally maps the pinned default to `jev-1.13.0` for
+/// [`crate::Provider::TypeSafe`], following the direct API's version convention.
 ///
 /// # Examples
 ///

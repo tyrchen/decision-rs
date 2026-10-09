@@ -19,6 +19,12 @@ audit:
 	@cargo audit
 	@cargo deny check
 
+publish-check:
+	@cargo publish --workspace --all-features --dry-run
+
+publish:
+	@cargo publish --workspace --all-features
+
 release:
 	@cargo release tag --execute
 	@git cliff -o CHANGELOG.md
@@ -29,4 +35,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test test-live lint feature-check audit release update-submodule
+.PHONY: build test test-live lint feature-check audit publish-check publish release update-submodule

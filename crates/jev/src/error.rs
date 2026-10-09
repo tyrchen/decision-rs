@@ -123,8 +123,11 @@ pub enum Error {
         limit: usize,
     },
 
-    /// Neither `JEV_API_KEY` nor `OPENROUTER_API_KEY` was set.
-    #[error("no API key configured (set JEV_API_KEY)")]
+    /// No API key was configured for the selected provider.
+    #[error(
+        "no API key configured (set JEV_API_KEY or the selected provider's OPENROUTER_API_KEY / \
+         TYPESAFE_API_KEY)"
+    )]
     MissingApiKey,
 
     /// The overall per-request deadline elapsed, including any retries.

@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use reqwest::header::{AUTHORIZATION, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 use tracing::{debug, instrument, warn};
 
@@ -14,6 +15,7 @@ use crate::{
     config::{Config, Surface},
     error::Error,
     model::Model,
+    provider::Provider,
     question::Questions,
     state::State,
     typed::{Choice, ChoiceOptions, Decision, Noul, Score, ScoreLevels},
@@ -29,13 +31,13 @@ const MAX_RESPONSE_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 /// Environment variable read first by [`Client::from_env`].
 const ENV_API_KEY: &str = "JEV_API_KEY";
-/// Fallback environment variable read by [`Client::from_env`].
-const ENV_API_KEY_FALLBACK: &str = "OPENROUTER_API_KEY";
+/// Optional environment variable selecting the hosted provider.
+const ENV_PROVIDER: &str = "JEV_PROVIDER";
 /// Optional environment variable overriding the API base URL.
 const ENV_BASE_URL: &str = "JEV_BASE_URL";
 
-/// Default API base URL (scheme + host), shared by both surfaces.
-const DEFAULT_API_BASE: &str = "https://openrouter.ai";
+/// Maximum API key length, in bytes, before building an authorization header.
+const MAX_API_KEY_BYTES: usize = 4096;
 
 /// A typed decision plus the response envelope: id, model snapshot, usage, and cost.
 ///
@@ -154,9 +156,10 @@ impl std::fmt::Debug for Client {
             &"none"
         };
         f.debug_struct("Client")
+            .field("provider", &self.provider())
             .field("api_base", &self.api_base())
             .field("model", &self.config.model)
-            .field("surface", &self.config.surface)
+            .field("surface", &self.surface())
             .field("api_key", api_key)
             // `http` is deliberately omitted: `reqwest::Client`'s own `Debug` output
             // is an internal connection-pool dump, not useful application diagnostics.
@@ -165,8 +168,8 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
-    /// Builds a client with its own connection pool, using whichever TLS backend
-    /// feature is enabled (`rustls-tls` by default).
+    /// Builds an `OpenRouter` client with the supplied API key and its own connection
+    /// pool, using whichever TLS backend feature is enabled (`rustls-tls` by default).
     ///
     /// # Errors
     ///
@@ -174,12 +177,86 @@ impl Client {
     /// feature is enabled: with no TLS backend compiled in, this constructor cannot
     /// build an HTTPS-capable `reqwest::Client`. Use [`Client::with_http`] with a
     /// caller-supplied client in that configuration.
+    /// Also returns [`Error::Invalid`] for an empty key, a key over 4096 bytes,
+    /// or a key containing whitespace or non-ASCII characters.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn run(key: String) -> Result<(), jev::Error> {
+    /// let client = jev::Client::new(key)?;
+    /// assert_eq!(client.provider(), jev::Provider::OpenRouter);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(api_key: impl Into<SecretString>) -> Result<Self, Error> {
-        Self::from_config(
-            build_http_client(Config::default().timeout)?,
-            api_key,
-            Config::default(),
-        )
+        Self::openrouter(api_key)
+    }
+
+    /// Builds an `OpenRouter` client directly from an `OpenRouter` API key.
+    ///
+    /// # Errors
+    ///
+    /// Returns the construction and key-validation errors documented by [`Client::new`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn run(key: String) -> Result<(), jev::Error> {
+    /// let client = jev::Client::openrouter(key)?;
+    /// assert_eq!(client.api_base().as_str(), "https://openrouter.ai/");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn openrouter(api_key: impl Into<SecretString>) -> Result<Self, Error> {
+        Self::for_provider(Provider::OpenRouter, api_key)
+    }
+
+    /// Builds a `TypeSafe` AI client directly from a `TypeSafe` API key.
+    ///
+    /// Uses `https://api.typesafe.ai/v1/systemone` and `TypeSafe` model IDs
+    /// (`jev-1.13.0` for the pinned default, `jev-latest` for [`Model::Latest`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns the construction and key-validation errors documented by [`Client::new`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn run(key: String) -> Result<(), jev::Error> {
+    /// let client = jev::Client::typesafe(key)?;
+    /// assert_eq!(client.provider(), jev::Provider::TypeSafe);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn typesafe(api_key: impl Into<SecretString>) -> Result<Self, Error> {
+        Self::for_provider(Provider::TypeSafe, api_key)
+    }
+
+    /// Builds a client with a provider chosen at runtime and its matching API key.
+    ///
+    /// # Errors
+    ///
+    /// Returns the construction and key-validation errors documented by [`Client::new`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn run(key: String) -> Result<(), jev::Error> {
+    /// let client = jev::Client::for_provider(jev::Provider::TypeSafe, key)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn for_provider(
+        provider: Provider,
+        api_key: impl Into<SecretString>,
+    ) -> Result<Self, Error> {
+        let config = Config {
+            provider,
+            ..Config::default()
+        };
+        Self::from_config(build_http_client(config.timeout)?, api_key, config)
     }
 
     /// Builds a client that sends no `Authorization` header at all, for a System
@@ -223,6 +300,7 @@ impl Client {
     /// pool. This is the right choice inside a service that already owns an HTTP
     /// client, and the only way to supply a custom TLS configuration (for example a
     /// pinned internal CA), or to build with neither TLS feature enabled.
+    /// The key is validated before sending each request.
     pub fn with_http(http: reqwest::Client, api_key: impl Into<SecretString>) -> Self {
         Self {
             http,
@@ -236,37 +314,101 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// This constructor itself is infallible; it is fallible only so it can share an
-    /// implementation with [`Client::new`], which validates its own `http` build.
+    /// Returns [`Error::Invalid`] if the API key fails the validation documented
+    /// by [`Client::new`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn run(key: String) -> Result<(), jev::Error> {
+    /// let config = jev::Config { provider: jev::Provider::TypeSafe, ..Default::default() };
+    /// let client = jev::Client::from_config(reqwest::Client::new(), key, config)?;
+    /// assert_eq!(client.provider(), jev::Provider::TypeSafe);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn from_config(
         http: reqwest::Client,
         api_key: impl Into<SecretString>,
         config: Config,
     ) -> Result<Self, Error> {
+        let api_key = api_key.into();
+        validate_api_key(&api_key)?;
         Ok(Self {
             http,
-            api_key: Some(api_key.into()),
+            api_key: Some(api_key),
             config: Arc::new(config),
         })
     }
 
-    /// Builds a client from `JEV_API_KEY` (falling back to `OPENROUTER_API_KEY`) and
-    /// an optional `JEV_BASE_URL`.
+    /// Builds a client from environment variables, with an optional `JEV_BASE_URL`.
+    ///
+    /// `JEV_PROVIDER=openrouter|typesafe` selects the service explicitly; the key
+    /// comes from `JEV_API_KEY` or that provider's `OPENROUTER_API_KEY` /
+    /// `TYPESAFE_API_KEY`. A key belonging to the other provider is never used.
+    /// Without `JEV_PROVIDER`, keys are tried in this order: `JEV_API_KEY`
+    /// (`OpenRouter`), `OPENROUTER_API_KEY`, then `TYPESAFE_API_KEY` (`TypeSafe`).
     ///
     /// # Errors
     ///
-    /// Returns [`Error::MissingApiKey`] when neither environment variable is set, or
-    /// [`Error::Invalid`] when `JEV_BASE_URL` is set but not a valid `https://` URL
-    /// (or `http://` explicitly opted into; see [`Client::with_api_base`]).
+    /// Returns [`Error::MissingApiKey`] when no matching key is set, or
+    /// [`Error::Invalid`] for an unknown provider, an invalid key, or an invalid
+    /// `JEV_BASE_URL` (see [`Client::with_api_base`]).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn run() -> Result<(), jev::Error> {
+    /// // Configure TYPESAFE_API_KEY and JEV_PROVIDER=typesafe in your environment.
+    /// let client = jev::Client::from_env()?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn from_env() -> Result<Self, Error> {
-        let api_key = std::env::var(ENV_API_KEY)
-            .or_else(|_| std::env::var(ENV_API_KEY_FALLBACK))
-            .map_err(|_| Error::MissingApiKey)?;
-        let mut client = Self::new(SecretString::from(api_key))?;
+        let (provider, api_key) = credentials_from_env(|name| std::env::var(name).ok())?;
+        let mut client = Self::for_provider(provider, api_key)?;
         if let Ok(base_url) = std::env::var(ENV_BASE_URL) {
             client = client.with_api_base(&base_url)?;
         }
         Ok(client)
+    }
+
+    /// Selects the hosted provider while preserving custom HTTP and base URL settings.
+    ///
+    /// Supply the selected provider's key at construction. `TypeSafe` always uses
+    /// System One; `OpenRouter` uses the configured surface.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn run(key: String) -> Result<(), jev::Error> {
+    /// let client = jev::Client::with_http(reqwest::Client::new(), key)
+    ///     .with_provider(jev::Provider::TypeSafe);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn with_provider(mut self, provider: Provider) -> Self {
+        self.config_mut().provider = provider;
+        self
+    }
+
+    /// The hosted provider configured for this client.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let client = jev::Client::with_http(reqwest::Client::new(), "key");
+    /// assert_eq!(client.provider(), jev::Provider::OpenRouter);
+    /// ```
+    #[must_use]
+    pub fn provider(&self) -> Provider {
+        self.config.provider
+    }
+
+    /// The effective HTTP surface. `TypeSafe` always uses System One.
+    fn surface(&self) -> Surface {
+        self.provider().surface(self.config.surface)
     }
 
     /// Overrides the model sent on every request made by this client.
@@ -276,7 +418,7 @@ impl Client {
         self
     }
 
-    /// Overrides which HTTP surface this client calls.
+    /// Overrides the `OpenRouter` HTTP surface. `TypeSafe` always uses System One.
     #[must_use]
     pub fn with_surface(mut self, surface: Surface) -> Self {
         self.config_mut().surface = surface;
@@ -360,7 +502,7 @@ impl Client {
     #[must_use]
     pub fn api_base(&self) -> url::Url {
         self.config.api_base.clone().unwrap_or_else(|| {
-            url::Url::parse(DEFAULT_API_BASE).unwrap_or_else(|_| unreachable_url())
+            url::Url::parse(self.provider().api_base()).unwrap_or_else(|_| unreachable_url())
         })
     }
 
@@ -605,7 +747,8 @@ impl Client {
         skip(self, options, questions),
         fields(
             model,
-            surface = ?self.config.surface,
+            provider = ?self.provider(),
+            surface = ?self.surface(),
             questions = questions.len(),
             attempt,
             request_id,
@@ -620,7 +763,10 @@ impl Client {
         questions: &Questions,
     ) -> Result<(Response, Duration), Error> {
         let model = options.model.unwrap_or_else(|| self.config.model.clone());
-        let wire_model = model.wire_id(self.config.surface).into_owned();
+        let wire_model = self
+            .provider()
+            .wire_id(&model, self.config.surface)
+            .into_owned();
         tracing::Span::current().record("model", tracing::field::display(&wire_model));
 
         let session_id = options
@@ -686,7 +832,7 @@ impl Client {
     /// The full URL for this client's configured surface.
     fn request_url(&self) -> url::Url {
         let mut url = self.api_base();
-        url.set_path(self.config.surface.path());
+        url.set_path(self.provider().path(self.config.surface));
         url
     }
 
@@ -758,7 +904,7 @@ impl Client {
         trace: Option<&TraceConfig>,
     ) -> Result<Response, Error> {
         let (session_id, user, trace) =
-            drop_unsupported_fields(self.config.surface, session_id, user, trace);
+            drop_unsupported_fields(self.surface(), session_id, user, trace);
 
         let request = DecisionRequest {
             model: wire_model,
@@ -778,10 +924,16 @@ impl Client {
             .post(url.clone())
             .header(reqwest::header::CONTENT_TYPE, "application/json");
         if let Some(api_key) = &self.api_key {
-            request = request.header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {}", api_key.expose_secret()),
-            );
+            validate_api_key(api_key)?;
+            let mut authorization =
+                HeaderValue::from_str(&format!("Bearer {}", api_key.expose_secret())).map_err(
+                    |_| Error::Invalid {
+                        field: "api_key".to_string(),
+                        reason: "cannot be encoded as an authorization header".to_string(),
+                    },
+                )?;
+            authorization.set_sensitive(true);
+            request = request.header(AUTHORIZATION, authorization);
         }
         let http_response = request.body(body).send().await?;
 
@@ -800,6 +952,41 @@ impl Client {
 
         serde_json::from_slice(&bytes).map_err(|e| Error::Parse(e.to_string()))
     }
+}
+
+/// Resolves credentials without mutating process environment (including in tests).
+fn credentials_from_env(
+    get: impl Fn(&str) -> Option<String>,
+) -> Result<(Provider, SecretString), Error> {
+    if let Some(name) = get(ENV_PROVIDER) {
+        let provider = name.parse::<Provider>()?;
+        let key = get(ENV_API_KEY)
+            .or_else(|| get(provider.api_key_env()))
+            .ok_or(Error::MissingApiKey)?;
+        return Ok((provider, SecretString::from(key)));
+    }
+    if let Some(key) = get(ENV_API_KEY) {
+        return Ok((Provider::OpenRouter, SecretString::from(key)));
+    }
+    for provider in [Provider::OpenRouter, Provider::TypeSafe] {
+        if let Some(key) = get(provider.api_key_env()) {
+            return Ok((provider, SecretString::from(key)));
+        }
+    }
+    Err(Error::MissingApiKey)
+}
+
+/// Rejects invalid credentials without putting the secret in diagnostics.
+fn validate_api_key(key: &SecretString) -> Result<(), Error> {
+    let key = key.expose_secret();
+    if key.is_empty() || key.len() > MAX_API_KEY_BYTES || !key.bytes().all(|b| b.is_ascii_graphic())
+    {
+        return Err(Error::Invalid {
+            field: "api_key".to_string(),
+            reason: "must contain 1..=4096 printable ASCII bytes without whitespace".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// A `Client::new`/`Client::from_config`-friendly `reqwest::Client` builder.
@@ -1074,7 +1261,7 @@ fn is_local_http_opt_in(url: &url::Url) -> bool {
 /// Infallible fallback for the default API base URL, used only if the literal
 /// constant ever failed to parse (which `cargo test` guards against).
 fn unreachable_url() -> url::Url {
-    // Safety net, not a real fallible path: `DEFAULT_API_BASE` is a literal constant
+    // Safety net, not a real fallible path: the provider bases are literal constants
     // covered by `test_should_parse_default_api_base`.
     url::Url::parse("https://openrouter.ai").unwrap_or_else(|_| {
         // `data:` URLs always parse; this line is unreachable in practice.
@@ -1084,6 +1271,7 @@ fn unreachable_url() -> url::Url {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
     use secrecy::SecretString;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -1092,6 +1280,122 @@ mod tests {
 
     use super::*;
     use crate::CaseSet;
+
+    #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
+    #[test]
+    fn test_should_create_provider_clients_directly_with_keys() {
+        let default = Client::new("key").unwrap();
+        assert_eq!(default.provider(), Provider::OpenRouter);
+        let openrouter = Client::openrouter(String::from("key")).unwrap();
+        assert_eq!(
+            openrouter.request_url().as_str(),
+            "https://openrouter.ai/api/alpha/decisions"
+        );
+        let typesafe = Client::typesafe(SecretString::from("typesafe-super-secret")).unwrap();
+        assert_eq!(
+            typesafe.request_url().as_str(),
+            "https://api.typesafe.ai/v1/systemone"
+        );
+        assert!(!format!("{typesafe:?}").contains("typesafe-super-secret"));
+        assert!(format!("{typesafe:?}").contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_should_apply_provider_from_yaml_config() {
+        let config: Config = serde_norway::from_str("provider: typesafe\n").unwrap();
+        let client = Client::from_config(reqwest::Client::new(), "key", config).unwrap();
+        assert_eq!(client.provider(), Provider::TypeSafe);
+        assert_eq!(client.surface(), Surface::SystemOne);
+        assert_eq!(
+            client.request_url().as_str(),
+            "https://api.typesafe.ai/v1/systemone"
+        );
+    }
+
+    #[test]
+    fn test_should_preserve_custom_base_and_isolate_cloned_provider_settings() {
+        let openrouter = Client::with_http(reqwest::Client::new(), "key")
+            .with_api_base("http://127.0.0.1:8099")
+            .unwrap();
+        let typesafe = openrouter.clone().with_provider(Provider::TypeSafe);
+        assert_eq!(openrouter.request_url().path(), "/api/alpha/decisions");
+        assert_eq!(
+            typesafe.request_url().as_str(),
+            "http://127.0.0.1:8099/v1/systemone"
+        );
+    }
+
+    #[rstest]
+    #[case(vec![("JEV_API_KEY", "generic")], Provider::OpenRouter, "generic")]
+    #[case(vec![("OPENROUTER_API_KEY", "router")], Provider::OpenRouter, "router")]
+    #[case(vec![("TYPESAFE_API_KEY", "direct")], Provider::TypeSafe, "direct")]
+    #[case(vec![("OPENROUTER_API_KEY", "router"), ("TYPESAFE_API_KEY", "direct")], Provider::OpenRouter, "router")]
+    #[case(vec![("JEV_API_KEY", "generic"), ("OPENROUTER_API_KEY", "router"), ("TYPESAFE_API_KEY", "direct")], Provider::OpenRouter, "generic")]
+    #[case(vec![("JEV_PROVIDER", "typesafe"), ("TYPESAFE_API_KEY", "direct"), ("OPENROUTER_API_KEY", "router")], Provider::TypeSafe, "direct")]
+    #[case(vec![("JEV_PROVIDER", "typesafe"), ("JEV_API_KEY", "generic"), ("TYPESAFE_API_KEY", "direct")], Provider::TypeSafe, "generic")]
+    #[case(vec![("JEV_PROVIDER", "openrouter"), ("JEV_API_KEY", "generic"), ("OPENROUTER_API_KEY", "router")], Provider::OpenRouter, "generic")]
+    fn test_should_resolve_matching_environment_credentials(
+        #[case] variables: Vec<(&str, &str)>,
+        #[case] expected_provider: Provider,
+        #[case] expected_key: &str,
+    ) {
+        let (provider, key) = credentials_from_env(|name| {
+            variables
+                .iter()
+                .find(|(variable, _)| *variable == name)
+                .map(|(_, value)| (*value).to_string())
+        })
+        .unwrap();
+        assert_eq!(provider, expected_provider);
+        assert_eq!(key.expose_secret(), expected_key);
+    }
+
+    #[rstest]
+    #[case(vec![])]
+    #[case(vec![("JEV_PROVIDER", "typesafe"), ("OPENROUTER_API_KEY", "router")])]
+    #[case(vec![("JEV_PROVIDER", "openrouter"), ("TYPESAFE_API_KEY", "direct")])]
+    fn test_should_reject_missing_or_wrong_provider_environment_key(
+        #[case] variables: Vec<(&str, &str)>,
+    ) {
+        let result = credentials_from_env(|name| {
+            variables
+                .iter()
+                .find(|(variable, _)| *variable == name)
+                .map(|(_, value)| (*value).to_string())
+        });
+        assert!(matches!(result, Err(Error::MissingApiKey)));
+    }
+
+    #[test]
+    fn test_should_reject_unknown_environment_provider() {
+        let result = credentials_from_env(|name| match name {
+            "JEV_PROVIDER" => Some("unknown".to_string()),
+            "JEV_API_KEY" => Some("key".to_string()),
+            _ => None,
+        });
+        assert!(matches!(result, Err(Error::Invalid { field, .. }) if field == "provider"));
+    }
+
+    #[rstest]
+    #[case(String::new())]
+    #[case(" ".to_string())]
+    #[case("key\r\nInjected: value".to_string())]
+    #[case("含中文的key".to_string())]
+    #[case("x".repeat(MAX_API_KEY_BYTES + 1))]
+    fn test_should_reject_invalid_keys_without_exposing_them(#[case] key: String) {
+        let result = Client::from_config(reqwest::Client::new(), key, Config::default());
+        assert!(matches!(result, Err(Error::Invalid { ref field, .. }) if field == "api_key"));
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid api_key: must contain 1..=4096 printable ASCII bytes without whitespace"
+        );
+    }
+
+    #[test]
+    fn test_should_accept_key_at_maximum_byte_length() {
+        assert!(validate_api_key(&SecretString::from("x".repeat(MAX_API_KEY_BYTES))).is_ok());
+    }
 
     #[tokio::test]
     async fn test_should_run_case_and_tag_result_with_case_id() {
@@ -1157,7 +1461,9 @@ mod tests {
 
     #[test]
     fn test_should_parse_default_api_base() {
-        assert!(url::Url::parse(DEFAULT_API_BASE).is_ok());
+        for provider in [Provider::OpenRouter, Provider::TypeSafe] {
+            assert!(url::Url::parse(provider.api_base()).is_ok());
+        }
     }
 
     #[test]

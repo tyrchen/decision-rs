@@ -3,14 +3,15 @@
 //! network.
 
 use jev::{
-    Choice, ChoiceOptions, Client, Decision, Noul, Questions, RetryConfig, Score, ScoreLevels,
-    Surface,
+    Choice, ChoiceOptions, Client, Decision, Model, Noul, Provider, Questions, RequestOptions,
+    RetryConfig, Score, ScoreLevels, Surface, TraceConfig,
 };
+use rstest::rstest;
 use secrecy::SecretString;
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
-    matchers::{body_json, header, method, path},
+    matchers::{body_json, body_partial_json, header, method, path},
 };
 
 /// The triage decision from the crate-level docs, used as the golden fixture.
@@ -79,6 +80,122 @@ fn triage_response_body() -> serde_json::Value {
             }
         }
     })
+}
+
+#[rstest]
+#[case(Model::Jev113, "jev-1.13.0")]
+#[case(Model::Latest, "jev-latest")]
+#[case(Model::Custom("my-model".to_string()), "my-model")]
+#[tokio::test]
+async fn test_should_send_typesafe_requests_with_matching_key_and_model(
+    #[case] model: Model,
+    #[case] wire_model: &str,
+) {
+    let server = MockServer::start().await;
+    let questions = Questions::builder()
+        .noul("refund", "Refund?")
+        .build()
+        .unwrap();
+    let expected_body = json!({
+        "model": wire_model,
+        "state": "a refund ticket",
+        "questions": {"refund": {"type": "noul", "instructions": "Refund?"}}
+    });
+    Mock::given(method("POST"))
+        .and(path("/v1/systemone"))
+        .and(header("authorization", "Bearer typesafe-test-key"))
+        .and(body_json(expected_body))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "jev-1.13.0",
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+            "answers": {"refund": {"type": "noul", "noul": 0.95}}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = Client::typesafe("typesafe-test-key")
+        .unwrap()
+        .with_api_base(&server.uri())
+        .unwrap()
+        .with_retry(RetryConfig::disabled())
+        .with_model(Model::Custom("client-default".to_string()))
+        .with_session_id("session")
+        .with_user("user");
+    let response = client
+        .raw(
+            RequestOptions::new("a refund ticket")
+                .with_questions(&questions)
+                .with_model(model)
+                .with_session_id("override-session")
+                .with_user("override-user")
+                .with_trace(TraceConfig::new(json!({"enabled": true}))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(client.provider(), Provider::TypeSafe);
+    assert_eq!(response.answers.noul("refund").unwrap(), 0.95);
+    assert!(response.id.is_none());
+    assert!(response.provider.is_none());
+    assert!(response.usage.cost.is_none());
+}
+
+#[tokio::test]
+async fn test_should_decide_with_typesafe_pinned_default() {
+    let server = MockServer::start().await;
+    let mut response_body = triage_response_body();
+    response_body["model"] = json!("jev-1.13.0");
+    let object = response_body.as_object_mut().unwrap();
+    object.remove("id");
+    object.remove("provider");
+    response_body["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cost");
+    Mock::given(method("POST"))
+        .and(path("/v1/systemone"))
+        .and(header("authorization", "Bearer typesafe-test-key"))
+        .and(body_partial_json(json!({"model": "jev-1.13.0"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = Client::typesafe("typesafe-test-key")
+        .unwrap()
+        .with_api_base(&server.uri())
+        .unwrap();
+    let triage: Triage = client.decide("a checkout ticket").await.unwrap();
+    assert_eq!(*triage.team.value(), Team::Payments);
+    assert_eq!(triage.urgency.nearest(), Urgency::BlockingRevenue);
+}
+
+#[tokio::test]
+async fn test_should_send_supplied_openrouter_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/alpha/decisions"))
+        .and(header("authorization", "Bearer openrouter-test-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(triage_response_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = Client::openrouter("openrouter-test-key")
+        .unwrap()
+        .with_api_base(&server.uri())
+        .unwrap();
+    let triage: Triage = client.decide("a checkout ticket").await.unwrap();
+    assert_eq!(*triage.team.value(), Team::Payments);
+}
+
+#[tokio::test]
+async fn test_should_reject_invalid_key_with_caller_supplied_http_before_sending() {
+    let server = MockServer::start().await;
+    let client = Client::with_http(reqwest::Client::new(), "bad\nkey")
+        .with_provider(Provider::TypeSafe)
+        .with_api_base(&server.uri())
+        .unwrap();
+    let result = client.noul("a ticket", "Refund?").await;
+    assert!(matches!(result, Err(jev::Error::Invalid { field, .. }) if field == "api_key"));
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]

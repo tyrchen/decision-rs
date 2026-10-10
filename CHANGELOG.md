@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
+## 0.4.0 (unreleased)
+
+### Breaking changes
+
+- Rename the SDK package from `jev-typed` to `decision-rs` and its Rust import from
+  `jev` to `decision_rs`.
+- Rename `jev-macros` to `decision-macros`; derive helper attributes now use
+  `#[decision(...)]`.
+- Rename SDK environment variables to `DECISION_PROVIDER`, `DECISION_API_KEY` and
+  `DECISION_MODEL`. Provider-specific credential variables remain unchanged.
+
+### Changed
+
+- Version both workspace packages at 0.4.0 and move them to `crates/decision-rs`
+  and `crates/decision-macros`.
+- Update package metadata, repository/documentation links, HTTP user agent,
+  examples, release commands and current docs for the provider-neutral name.
+- Add the [0.4 migration guide](docs/migration-v0.4.md). Jev model identifiers and
+  backend protocols remain unchanged.
+
 ## 0.3.0 (unreleased)
 
 ### Added
@@ -27,7 +47,7 @@ All notable changes to this project will be documented in this file. See [conven
 - Remove native TLS; rustls uses aws-lc-rs. Require Rust 1.99 and version workspace
   packages at 0.3.0. See [the migration guide](docs/migration-v0.3.md).
 
-## [0.2.0](https://github.com/tyrchen/jev-typed/releases/tag/v0.2.0) - 2026-10-09
+## [0.2.0](https://github.com/tyrchen/decision-rs/releases/tag/v0.2.0) - 2026-10-09
 
 ### Added
 

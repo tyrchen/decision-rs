@@ -1,4 +1,4 @@
-# jev-typed
+# decision-rs
 
 Typed decisions for OpenAI Decisions, OpenRouter Jev and TypeSafe System One.
 Declare questions once and select a provider when constructing the client. The
@@ -6,19 +6,20 @@ same business types, acceptance methods and error categories work on every backe
 
 ```toml
 [dependencies]
-jev = { package = "jev-typed", version = "0.3" }
+decision-rs = "0.4.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
+Import the library as `decision_rs`; derive helper attributes use `#[decision(...)]`.
 Requires Rust 1.99 or later, edition 2024.
 
 ```rust,no_run
-use jev::{Choice, ChoiceOptions, Client, Decision, Outcome, Predicate, Probability};
+use decision_rs::{Choice, ChoiceOptions, Client, Decision, Outcome, Predicate, Probability};
 
 #[derive(Debug, Decision)]
 struct Triage {
     /// Does the ticket describe a product defect?
-    #[jev(yes = "Describes broken product behavior.",
+    #[decision(yes = "Describes broken product behavior.",
           no = "Requests information or a new feature.")]
     defect: Predicate,
     /// Which team should help?
@@ -33,7 +34,7 @@ enum Team {
     Technical,
 }
 
-async fn triage(key: String) -> Result<(), jev::Error> {
+async fn triage(key: String) -> Result<(), decision_rs::Error> {
     let client = Client::openai(key)?;
     // Client::openrouter(key)? and Client::typesafe(key)? use the same schema.
     let answer: Triage = client.decide("The screen arrived broken.").await?;
@@ -64,10 +65,10 @@ Model calibration can differ, so evaluate thresholds for each model.
 backend. Runtime schemas use `Questions::builder`; `Client::ask` returns checked,
 declaration-ordered answers and metadata. No provider wire types enter business code.
 
-Set `JEV_PROVIDER=openai|openrouter|typesafe` and either `JEV_API_KEY` or the matching
+Set `DECISION_PROVIDER=openai|openrouter|typesafe` and either `DECISION_API_KEY` or the matching
 `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `TYPESAFE_API_KEY`. With no provider, exactly
 one provider-specific key is required. Multiple keys or an unassigned generic key
-produce an ambiguity error. `JEV_MODEL` optionally overrides the provider-aware default.
+produce an ambiguity error. `DECISION_MODEL` optionally overrides the provider-aware default.
 
 | Provider | Default model |
 |---|---|
@@ -94,7 +95,7 @@ ambiguous failures after sending. Evidence, schemas, bodies and concurrency are 
 
 [Quickstart](docs/quickstart.md) · [Primitives](docs/primitives.md) ·
 [Thresholds](docs/thresholds.md) · [Cases](docs/cases.md) ·
-[0.3 migration](docs/migration-v0.3.md) · [Design](specs/unified-decision-backends-design.md)
+[0.4 migration](docs/migration-v0.4.md) · [Design](specs/unified-decision-backends-design.md)
 
 Run `make build`, `make test`, `make lint`, `make feature-check`, `make audit`, and
 `make publish-check` for the release gates. `make test-live` requires all three

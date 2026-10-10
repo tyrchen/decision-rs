@@ -1,5 +1,8 @@
 # OpenAI Decisions API 集成研究
 
+> Historical integration research for jev-typed 0.2/0.3. The SDK is now
+> `decision-rs` 0.4.0; see the [migration guide](../migration-v0.4.md).
+
 核对日期：2026 年 10 月 9 日。OpenAI Decisions 与 jev-typed 的三种决策原语高度匹配，适合接入现有 typed decision 能力。建议将 SDK 的公共模型改为与供应商无关的决策模型，在内部编译不同的请求协议并校验答案；只增加 provider 和 endpoint 无法完成集成。
 
 ## 官方能力与适用边界
@@ -27,17 +30,17 @@ API 返回选择和评分的概率分布，并分别提供 `confidence`；拒答
 | 按 key 保存的 `Answers` | 有 `name` 的答案列表 | 校验后转为规范答案 |
 | 概率 map | 概率列表 | 按选项 key 或等级下标转换 |
 
-上述现状来自 [question.rs](https://github.com/tyrchen/jev-typed/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/question.rs)、[state.rs](https://github.com/tyrchen/jev-typed/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/state.rs)、[answer.rs](https://github.com/tyrchen/jev-typed/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/answer.rs)、[wire.rs](https://github.com/tyrchen/jev-typed/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/wire.rs)；OpenAI 字段来自 [HTTP API reference](https://developers.openai.com/api/reference/resources/decisions/methods/create)。
+上述现状来自 [question.rs](https://github.com/tyrchen/decision-rs/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/question.rs)、[state.rs](https://github.com/tyrchen/decision-rs/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/state.rs)、[answer.rs](https://github.com/tyrchen/decision-rs/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/answer.rs)、[wire.rs](https://github.com/tyrchen/decision-rs/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/wire.rs)；OpenAI 字段来自 [HTTP API reference](https://developers.openai.com/api/reference/resources/decisions/methods/create)。
 
 ## 代码中需要改变的边界
 
-[Provider](https://github.com/tyrchen/jev-typed/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/provider.rs) 目前只管理 endpoint、surface 和模型 ID；[Client](https://github.com/tyrchen/jev-typed/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/client.rs) 总是序列化同一种 `DecisionRequest`，再反序列化同一种 `Response`。这适用于两个 Jev surface，但 OpenAI 不共享这个协议。
+[Provider](https://github.com/tyrchen/decision-rs/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/provider.rs) 目前只管理 endpoint、surface 和模型 ID；[Client](https://github.com/tyrchen/decision-rs/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/client.rs) 总是序列化同一种 `DecisionRequest`，再反序列化同一种 `Response`。这适用于两个 Jev surface，但 OpenAI 不共享这个协议。
 
-[Config](https://github.com/tyrchen/jev-typed/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/config.rs) 的全局默认模型是 Jev；只添加 OpenAI provider 会让默认配置产生错误模型组合。[Model](https://github.com/tyrchen/jev-typed/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/model.rs) 的 `Latest` 与 `wire_id(Surface)` 也带有 Jev 假设。模型解析应在 client 建立时结合 provider 完成，并在发起请求之前拒绝已知不兼容组合。
+[Config](https://github.com/tyrchen/decision-rs/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/config.rs) 的全局默认模型是 Jev；只添加 OpenAI provider 会让默认配置产生错误模型组合。[Model](https://github.com/tyrchen/decision-rs/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/model.rs) 的 `Latest` 与 `wire_id(Surface)` 也带有 Jev 假设。模型解析应在 client 建立时结合 provider 完成，并在发起请求之前拒绝已知不兼容组合。
 
-[Guidance](https://github.com/tyrchen/jev-typed/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/guidance.rs) 可以是字符串、对象或数组。公共问题描述需要收敛为明确文本，避免同一个结构化 criteria 在不同后端被解释成不同协议。`Input::json` 则应保留为有明确序列化规则的业务证据入口。
+[Guidance](https://github.com/tyrchen/decision-rs/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/guidance.rs) 可以是字符串、对象或数组。公共问题描述需要收敛为明确文本，避免同一个结构化 criteria 在不同后端被解释成不同协议。`Input::json` 则应保留为有明确序列化规则的业务证据入口。
 
-[ScoreLevels](https://github.com/tyrchen/jev-typed/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/typed.rs) 目前仅提供等级描述。为每个等级保留稳定 key 和描述后，可以生成 OpenAI label，同时保持 Jev 的等级顺序。[derive](https://github.com/tyrchen/jev-typed/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev-macros/src/decision.rs) 的 optional 当前仅意味着容忍缺失答案，不代表拒答；新设计应明确区分这些状态。
+[ScoreLevels](https://github.com/tyrchen/decision-rs/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev/src/typed.rs) 目前仅提供等级描述。为每个等级保留稳定 key 和描述后，可以生成 OpenAI label，同时保持 Jev 的等级顺序。[derive](https://github.com/tyrchen/decision-rs/blob/0008e9be684a999e8d4cc4e30980890b9a88ce95/crates/jev-macros/src/decision.rs) 的 optional 当前仅意味着容忍缺失答案，不代表拒答；新设计应明确区分这些状态。
 
 ## 关键设计判断
 

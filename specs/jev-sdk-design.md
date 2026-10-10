@@ -1,6 +1,6 @@
 # Jev Rust SDK — Typed Decision Client
 
-> Historical v0.1 design. The public contract is replaced by [the v0.3 unified backend design](unified-decision-backends-design.md).
+> Historical v0.1 design. The public contract is replaced by [the unified backend design](unified-decision-backends-design.md). Current names follow the [0.4 migration guide](../docs/migration-v0.4.md).
 
 
 **Status**: Implemented (v0.1.0)

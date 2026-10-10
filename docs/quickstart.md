@@ -1,11 +1,11 @@
 # Quickstart
 
-Add `jev = { package = "jev-typed", version = "0.3" }` and Tokio with `macros` and
+Add `decision-rs = "0.4.0"` and Tokio with `macros` and
 `rt-multi-thread`. Rust 1.99 and edition 2024 are required. Default features include
 derives, bounded retry and rustls with aws-lc-rs.
 
 ```rust,no_run
-use jev::{Client, Decision, Predicate, RequestOptions};
+use decision_rs::{Client, Decision, Predicate, RequestOptions};
 
 #[derive(Debug, Decision)]
 struct Review {
@@ -13,7 +13,7 @@ struct Review {
     refund: Predicate,
 }
 
-async fn review(key: String) -> Result<(), jev::Error> {
+async fn review(key: String) -> Result<(), decision_rs::Error> {
     let client = Client::openai(key)?;
     let answer = client.decide_with::<Review>(RequestOptions::new("Please refund me.")?).await?;
     let probability = answer.value.refund.probability().get();
@@ -27,12 +27,12 @@ Jev. `Client::new(provider, key)` supports runtime selection. Known incompatible
 model/provider combinations fail before sending; custom IDs are sent unchanged.
 `Model::Default` resolves to Luna for OpenAI and Jev113 for either Jev provider.
 
-For environment construction, set `JEV_PROVIDER` and the matching provider key or
-`JEV_API_KEY`. Without an explicit provider, exactly one provider-specific key can
+For environment construction, set `DECISION_PROVIDER` and the matching provider key or
+`DECISION_API_KEY`. Without an explicit provider, exactly one provider-specific key can
 be inferred. Generic keys require a provider; invalid present values are errors.
 
 ```sh
-export JEV_PROVIDER=openai
+export DECISION_PROVIDER=openai
 # Load OPENAI_API_KEY through your environment or secret manager.
 cargo run --example 03_multi_question_decision
 cargo run --example 07_batch_concurrent --features batch
@@ -59,8 +59,8 @@ Unknown/duplicate keys, aliases, invalid thresholds and out-of-range settings ar
 rejected. `Settings` also works with `Client::builder(provider)`.
 
 ```rust,no_run
-# fn setup() -> Result<(), jev::Error> {
-use jev::{Auth, Client, Endpoint, HttpClient, Provider};
+# fn setup() -> Result<(), decision_rs::Error> {
+use decision_rs::{Auth, Client, Endpoint, HttpClient, Provider};
 let http = HttpClient::new()?;
 let hosted = Client::builder(Provider::OpenAi).api_key("application-loaded-key").http(http.clone()).build()?;
 let endpoint = Endpoint::system_one("http://127.0.0.1:8080/v1/systemone")?;
@@ -83,4 +83,4 @@ cargo test --test live --all-features -- --ignored case_3 # TypeSafe
 ```
 
 See [primitives](primitives.md), [thresholds](thresholds.md), [cases](cases.md),
-and [migration](migration-v0.3.md).
+and [migration](migration-v0.4.md).

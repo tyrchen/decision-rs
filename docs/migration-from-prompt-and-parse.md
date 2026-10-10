@@ -6,8 +6,8 @@ instructions on fields and criteria on variants. The derive turns that single
 schema into each backend's request and a checked business result.
 
 ```rust,no_run
-# async fn run(client: jev::Client) -> Result<(), jev::Error> {
-use jev::{Decision, Outcome, Predicate};
+# async fn run(client: decision_rs::Client) -> Result<(), decision_rs::Error> {
+use decision_rs::{Decision, Outcome, Predicate};
 #[derive(Debug, Decision)]
 struct Review {
     /// Does the customer explicitly request money back?
@@ -29,4 +29,4 @@ in client construction; no response JSON parsing or wire-kind branching is neede
 Decisions return bounded categorical probabilities and continuous scores rather
 than prose. Use explicit gates with an escalation band, evaluate per model, and
 retain response metadata when monitoring outcomes. See [primitives](primitives.md),
-[thresholds](thresholds.md) and [0.3 migration](migration-v0.3.md).
+[thresholds](thresholds.md) and [0.4 migration](migration-v0.4.md).

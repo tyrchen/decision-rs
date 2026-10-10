@@ -51,10 +51,10 @@ each evidence object separately obeys 32 levels and 10000 nodes.
 
 ```rust,no_run
 # #[cfg(all(feature = "batch", feature = "yaml"))]
-# async fn run() -> Result<(), jev::Error> {
-let cases = jev::CaseSet::from_file("cases.yaml").await?;
-let client = jev::Client::from_env()?;
-for result in jev::run_cases(&client, &cases, 4).await? {
+# async fn run() -> Result<(), decision_rs::Error> {
+let cases = decision_rs::CaseSet::from_file("cases.yaml").await?;
+let client = decision_rs::Client::from_env()?;
+for result in decision_rs::run_cases(&client, &cases, 4).await? {
     let completed = result?;
     tracing::info!(id = %completed.id, tokens = completed.response.meta.usage.input_tokens, "case completed");
 }

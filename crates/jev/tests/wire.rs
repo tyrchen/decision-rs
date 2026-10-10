@@ -1,6 +1,10 @@
 //! Real HTTP contract tests against local endpoints; no external requests.
 
-use std::time::Duration;
+use std::{
+    future::{Future, poll_fn},
+    task::Poll,
+    time::Duration,
+};
 
 use jev::{
     Auth, Choice, ChoiceOptions, Client, Decision, Endpoint, Error, HttpClient, Input, Model,
@@ -9,8 +13,9 @@ use jev::{
 };
 use rstest::rstest;
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
+    Mock, MockServer, Request, ResponseTemplate,
     matchers::{body_json, header, method, path},
 };
 
@@ -621,26 +626,54 @@ async fn test_should_decode_mixed_refusal_without_losing_other_fields() {
 #[tokio::test]
 async fn test_should_include_semaphore_wait_in_deadline_across_clones() {
     let server = MockServer::start().await;
+    let (started, mut received) = mpsc::channel(1);
     Mock::given(method("POST"))
-        .respond_with(
+        .respond_with(move |_: &Request| {
+            started.try_send(()).unwrap();
             ResponseTemplate::new(200)
                 .set_body_json(triage_body(true))
-                .set_delay(Duration::from_millis(200)),
-        )
+                .set_delay(Duration::from_secs(60))
+        })
         .expect(1)
         .mount(&server)
         .await;
     let mut s = settings();
     s.max_inflight = 1;
-    s.timeout_ms = 60;
+    s.timeout_ms = 5000;
     let client = client(&server, true, s);
     let clone = client.clone();
-    let (first, second) = tokio::join!(
-        client.decide::<Triage>("one"),
-        clone.decide::<Triage>("two")
-    );
-    assert!(matches!(first, Err(Error::Timeout)));
+    let first = client.decide::<Triage>("one");
+    tokio::pin!(first);
+    tokio::select! {
+        result = &mut first => panic!("first request completed before the server received it: {result:?}"),
+        message = received.recv() => assert_eq!(message, Some(())),
+    }
+
+    // Keep the first future unpolled so its permit remains held even after its
+    // timer expires. The waiter must time out without the holder releasing it.
+    // Pause after the HTTP handshake so virtual time cannot expire its deadline
+    // while the real socket connection is still being established.
+    tokio::time::pause();
+    let second = clone.decide::<Triage>("two");
+    tokio::pin!(second);
+    poll_fn(|cx| {
+        assert!(second.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+    poll_fn(|cx| {
+        assert!(second.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    tokio::time::advance(Duration::from_millis(1001)).await;
+    let second = tokio::time::timeout(Duration::from_secs(1), second)
+        .await
+        .expect("the queued request must honor its own deadline");
     assert!(matches!(second, Err(Error::Timeout)));
+    assert!(matches!(first.await, Err(Error::Timeout)));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 #[cfg(feature = "retry")]
 #[tokio::test]

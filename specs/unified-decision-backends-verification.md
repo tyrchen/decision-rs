@@ -41,6 +41,8 @@ cargo deny 仍报告既有 policy 中未被使用的 license allowlist 项及 sy
 
 HTTP fixtures 检查 OpenAI、Jev 与 System One 请求、同一业务类型的等价结果、响应 name 的完整唯一集合、duplicate JSON key、错类型及概率分布/score 不变量。还检查模型家族不匹配零 HTTP、显式 provider 密钥隔离、响应 metadata/accounting、401/403/402、额度类 429 与可重试限流、5xx、两种 Retry-After、redirect、实际响应字节 cap、clone 并发许可、排队 deadline、取消与发送后断连。
 
+PR 首次 Linux CI 暴露了排队 deadline 测试中的时序竞争：两个请求的起始时间不同，先超时的请求释放许可后，后一个请求仍可能在自己的 deadline 内发送；旧测试对单次 HTTP 的断言不成立。修复后的测试先通过 channel 确认第一条请求已经到达，再保持其 future 未被 poll，确保许可在第二条超时前持续占用。第二条使用 Tokio 虚拟时钟分别验证 deadline 前仍 pending、deadline 后返回 Timeout，最后确认只有一条 HTTP 请求。`make test-concurrency` 在 CI 重复该回归 100 次；无 retry feature 的协议测试也覆盖该路径。生产 timeout 和 semaphore 行为没有改变。
+
 宏验证包含 12 个 compile-fail fixtures，覆盖重复问题/levels、超过题数上限、非法字段、Option 和嵌套 Outcome；手写非法 schema 返回缓存的 SchemaError。Case 测试验证 JSON/YAML 等价、严格 version 2、未知字段、重复 ID 与 parser 预算；batch 保序并保留逐项错误。Property tests 检查名称关联和概率分布；回归 seed 随源码保留。
 
 ## 在线验证与边界

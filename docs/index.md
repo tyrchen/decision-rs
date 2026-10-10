@@ -2,8 +2,11 @@
 
 | Doc | Summary |
 |---|---|
-| [quickstart.md](./quickstart.md) | Install, choose OpenRouter or TypeSafe AI, create a client with a key or environment variables, and run the bundled examples. |
-| [primitives.md](./primitives.md) | `Noul`, `Choice<T>`, `Score<T>` — one worked example each. |
-| [thresholds.md](./thresholds.md) | Calibration vs. accuracy, escalation bands, `Thresholds` config. |
-| [cases.md](./cases.md) | Loading predefined `(state, questions)` cases from YAML/JSON and running them with `Client::run_case` / `run_cases`. |
-| [migration-from-prompt-and-parse.md](./migration-from-prompt-and-parse.md) | Recipe for replacing a chat-model classification prompt with a typed `Decision`. |
+| [quickstart.md](quickstart.md) | Hosted/custom clients, deterministic credentials, configuration, features and live smoke commands. |
+| [primitives.md](primitives.md) | Predicate, Choice, Score, Outcome and checked dynamic answers. |
+| [thresholds.md](thresholds.md) | Event probability, native confidence, escalation and model-specific evaluation. |
+| [cases.md](cases.md) | Strict version 2 JSON/YAML cases and bounded execution. |
+| [migration-v0.3.md](migration-v0.3.md) | Complete breaking API and behavior changes from 0.2. |
+| [migration-from-prompt-and-parse.md](migration-from-prompt-and-parse.md) | Replace prose classification with typed decisions. |
+| [research/openai-decisions.md](research/openai-decisions.md) | API findings, protocol constraints and primary sources. |
+| [research/decision-runtime-dependencies.md](research/decision-runtime-dependencies.md) | Bounded YAML and HTTP retry dependency decisions. |

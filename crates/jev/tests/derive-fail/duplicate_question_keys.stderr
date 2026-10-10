@@ -1,5 +1,5 @@
 error: duplicate question key `same`; every field must have a distinct key
   --> tests/derive-fail/duplicate_question_keys.rs:11:5
    |
-11 |     is_urgent: Noul,
+11 |     is_urgent: Predicate,
    |     ^^^^^^^^^

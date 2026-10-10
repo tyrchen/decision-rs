@@ -22,18 +22,17 @@ struct FieldAttrs {
     instructions: Option<String>,
     yes: Option<String>,
     no: Option<String>,
-    optional: bool,
 }
 
-/// The primitive a field maps to, after unwrapping an outer `Option<_>`.
+/// The primitive a field maps to, after unwrapping an outer `Outcome<_>`.
 enum FieldKind<'a> {
-    Noul,
+    Predicate,
     Choice(&'a Type),
     Score(&'a Type),
 }
 
-/// One resolved field: its wire key, instructions, primitive, and whether a missing
-/// answer should be tolerated (`#[jev(optional)]`).
+/// One resolved field: its wire key, instructions, primitive, and whether refusal is
+/// explicitly retained in `Outcome`.
 struct ResolvedField<'a> {
     field_ident: &'a Ident,
     key: String,
@@ -41,11 +40,11 @@ struct ResolvedField<'a> {
     yes: Option<String>,
     no: Option<String>,
     kind: FieldKind<'a>,
-    optional: bool,
+    outcome: bool,
 }
 
-/// Derives `impl Decision` for a struct whose fields are `Noul`, `Choice<T>`,
-/// `Score<T>`, or `Option<_>` of those.
+/// Derives `impl Decision` for a struct whose fields are `Predicate`, `Choice<T>`,
+/// `Score<T>`, or `Outcome<_>` of those.
 ///
 /// # Clippy
 ///
@@ -55,6 +54,13 @@ struct ResolvedField<'a> {
 /// gain.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn expand_decision(input: &DeriveInput) -> TokenStream {
+    if !input.generics.params.is_empty() {
+        return syn::Error::new_spanned(
+            &input.generics,
+            "Decision requires a concrete struct without generic parameters",
+        )
+        .to_compile_error();
+    }
     let Data::Struct(data_struct) = &input.data else {
         return syn::Error::new_spanned(
             &input.ident,
@@ -91,31 +97,15 @@ pub(crate) fn expand_decision(input: &DeriveInput) -> TokenStream {
             }
         };
 
-        let (inner_type, field_optional) = unwrap_option(&field.ty);
+        let (inner_type, field_outcome) = unwrap_outcome(&field.ty);
         let Some(kind) = classify_field_type(inner_type) else {
             errors.push(syn::Error::new_spanned(
                 &field.ty,
-                "unsupported `Decision` field type; expected `Noul`, `Choice<T>`, `Score<T>`, or \
-                 `Option<_>` of one of those",
+                "unsupported `Decision` field type; expected `Predicate`, `Choice<T>`, \
+                 `Score<T>`, or `Outcome<_>` of one of those",
             ));
             continue;
         };
-
-        if field_optional && !attrs.optional {
-            errors.push(syn::Error::new_spanned(
-                field_ident,
-                "an `Option<_>` field requires `#[jev(optional)]`, so a missing answer is a \
-                 deliberate, documented choice rather than an accident",
-            ));
-            continue;
-        }
-        if attrs.optional && !field_optional {
-            errors.push(syn::Error::new_spanned(
-                field_ident,
-                "`#[jev(optional)]` requires the field type to be `Option<_>`",
-            ));
-            continue;
-        }
 
         let key = match &attrs.key {
             Some(k) => k.clone(),
@@ -153,7 +143,7 @@ pub(crate) fn expand_decision(input: &DeriveInput) -> TokenStream {
             continue;
         }
 
-        if matches!(kind, FieldKind::Noul) {
+        if matches!(kind, FieldKind::Predicate) {
             match (&attrs.yes, &attrs.no) {
                 (Some(_), None) | (None, Some(_)) => {
                     errors.push(syn::Error::new_spanned(
@@ -181,7 +171,7 @@ pub(crate) fn expand_decision(input: &DeriveInput) -> TokenStream {
         } else if attrs.yes.is_some() || attrs.no.is_some() {
             errors.push(syn::Error::new_spanned(
                 field_ident,
-                "`#[jev(yes = ..., no = ...)]` only applies to `Noul` fields",
+                "`#[jev(yes = ..., no = ...)]` only applies to `Predicate` fields",
             ));
             continue;
         }
@@ -193,14 +183,14 @@ pub(crate) fn expand_decision(input: &DeriveInput) -> TokenStream {
             yes: attrs.yes.clone(),
             no: attrs.no.clone(),
             kind,
-            optional: field_optional,
+            outcome: field_outcome,
         });
     }
 
-    if fields.named.is_empty() {
+    if fields.named.is_empty() || fields.named.len() > 64 {
         errors.push(syn::Error::new_spanned(
             &input.ident,
-            "`Decision` requires at least one field (one question)",
+            "`Decision` requires 1..=64 fields (one question per field)",
         ));
     }
 
@@ -214,11 +204,11 @@ pub(crate) fn expand_decision(input: &DeriveInput) -> TokenStream {
     generate_decision_impl(&input.ident, &resolved)
 }
 
-/// If `ty` is `Option<Inner>`, returns `(Inner, true)`; otherwise `(ty, false)`.
-fn unwrap_option(ty: &Type) -> (&Type, bool) {
+/// If `ty` is `Outcome<Inner>`, returns `(Inner, true)`; otherwise `(ty, false)`.
+fn unwrap_outcome(ty: &Type) -> (&Type, bool) {
     if let Type::Path(type_path) = ty
         && let Some(segment) = type_path.path.segments.last()
-        && segment.ident == "Option"
+        && segment.ident == "Outcome"
         && let PathArguments::AngleBracketed(args) = &segment.arguments
         && let Some(GenericArgument::Type(inner)) = args.args.first()
     {
@@ -227,7 +217,7 @@ fn unwrap_option(ty: &Type) -> (&Type, bool) {
     (ty, false)
 }
 
-/// Classifies `ty` as `Noul`, `Choice<T>`, or `Score<T>`, extracting `T` for the
+/// Classifies `ty` as `Predicate`, `Choice<T>`, or `Score<T>`, extracting `T` for the
 /// latter two.
 fn classify_field_type(ty: &Type) -> Option<FieldKind<'_>> {
     let Type::Path(type_path) = ty else {
@@ -235,7 +225,7 @@ fn classify_field_type(ty: &Type) -> Option<FieldKind<'_>> {
     };
     let segment = type_path.path.segments.last()?;
     match segment.ident.to_string().as_str() {
-        "Noul" => Some(FieldKind::Noul),
+        "Predicate" => Some(FieldKind::Predicate),
         "Choice" => generic_arg(segment).map(FieldKind::Choice),
         "Score" => generic_arg(segment).map(FieldKind::Score),
         _ => None,
@@ -263,10 +253,10 @@ fn validate_key(key: &str) -> Result<(), String> {
     }
     let valid = key
         .bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
     if !valid {
         return Err(format!(
-            "key `{key}` must match `^[a-z0-9_]{{1,{MAX_KEY_BYTES}}}$`"
+            "key `{key}` must match `^[a-zA-Z0-9_-]{{1,{MAX_KEY_BYTES}}}$`"
         ));
     }
     Ok(())
@@ -283,133 +273,59 @@ fn validate_guidance(field: &str, text: &str) -> Result<(), String> {
             text.len()
         ));
     }
+    if text
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return Err(format!("{field} contains abnormal control characters"));
+    }
     Ok(())
 }
 
-/// Generates the `impl Decision` block: a `LazyLock<Questions>` and `from_answers`.
+/// Generate a safely cached schema and checked typed decoder.
 fn generate_decision_impl(struct_ident: &Ident, fields: &[ResolvedField<'_>]) -> TokenStream {
-    let question_entries = fields.iter().map(build_question_entry);
-
-    let from_answers_fields = fields.iter().map(build_from_answers_field);
-    let field_idents: Vec<&Ident> = fields.iter().map(|f| f.field_ident).collect();
-
+    let additions = fields.iter().map(build_question_entry);
+    let required = fields.iter().filter(|f| !f.outcome).map(|f| &f.key);
+    let decoded = fields.iter().map(|f| {
+        let ident = f.field_ident;
+        let key = &f.key;
+        quote! { let #ident = answers.decode(#key)?; }
+    });
+    let idents = fields.iter().map(|f| f.field_ident);
     quote! {
         impl ::jev::Decision for #struct_ident {
-            fn questions() -> &'static ::jev::Questions {
-                static QUESTIONS: ::std::sync::LazyLock<::jev::Questions> = ::std::sync::LazyLock::new(|| {
-                    ::jev::Questions::from_validated_entries(::std::vec![
-                        #( #question_entries ),*
-                    ])
-                });
-                &QUESTIONS
+            fn questions() -> ::std::result::Result<&'static ::jev::Questions, ::jev::Error> {
+                static QUESTIONS: ::std::sync::LazyLock<::std::result::Result<::jev::Questions, ::jev::SchemaError>> =
+                    ::std::sync::LazyLock::new(|| ::jev::Questions::builder() #(#additions)* .build());
+                match &*QUESTIONS {
+                    ::std::result::Result::Ok(questions) => ::std::result::Result::Ok(questions),
+                    ::std::result::Result::Err(error) => ::std::result::Result::Err(error.clone().into()),
+                }
             }
-
-            fn from_answers(answers: &::jev::Answers) -> ::std::result::Result<Self, ::jev::Error> {
-                #( #from_answers_fields )*
-                ::std::result::Result::Ok(#struct_ident {
-                    #( #field_idents ),*
-                })
+            fn from_answers(answers: &::jev::Answers) -> ::std::result::Result<Self, ::jev::DecodeError> {
+                answers.require(&[#(#required),*])?;
+                #(#decoded)*
+                ::std::result::Result::Ok(Self { #(#idents),* })
             }
         }
     }
 }
-
-/// Builds one `(key, Question)` tuple literal for the `questions()` initializer.
 fn build_question_entry(field: &ResolvedField<'_>) -> TokenStream {
     let key = &field.key;
     let instructions = &field.instructions;
-
     match &field.kind {
-        FieldKind::Noul => {
-            let criteria = if let (Some(yes), Some(no)) = (&field.yes, &field.no) {
-                quote! {
-                    ::std::option::Option::Some(::jev::NoulCriteria {
-                        r#true: ::jev::Guidance::from(#yes),
-                        r#false: ::jev::Guidance::from(#no),
-                    })
-                }
+        FieldKind::Predicate => {
+            if let (Some(yes), Some(no)) = (&field.yes, &field.no) {
+                quote! { .predicate_with(#key, #instructions, #yes, #no) }
             } else {
-                quote! { ::std::option::Option::None }
-            };
-            quote! {
-                (
-                    #key.to_string(),
-                    ::jev::Question::Noul {
-                        instructions: ::jev::Guidance::from(#instructions),
-                        criteria: #criteria,
-                    },
-                )
+                quote! { .predicate(#key, #instructions) }
             }
         }
-        FieldKind::Choice(ty) => quote! {
-            (
-                #key.to_string(),
-                ::jev::Question::Choice {
-                    instructions: ::jev::Guidance::from(#instructions),
-                    criteria: <#ty as ::jev::ChoiceOptions>::options()
-                        .iter()
-                        .map(|(k, v)| ((*k).to_string(), ::jev::Guidance::from(*v)))
-                        .collect(),
-                },
-            )
-        },
-        FieldKind::Score(ty) => quote! {
-            (
-                #key.to_string(),
-                ::jev::Question::Score {
-                    instructions: ::jev::Guidance::from(#instructions),
-                    criteria: <#ty as ::jev::ScoreLevels>::levels()
-                        .iter()
-                        .map(|v| ::jev::Guidance::from(*v))
-                        .collect(),
-                },
-            )
-        },
-    }
-}
-
-/// Builds the `let #field_ident = ...;` statement reading one answer in
-/// `from_answers`.
-fn build_from_answers_field(field: &ResolvedField<'_>) -> TokenStream {
-    let ident = field.field_ident;
-    let key = &field.key;
-
-    let build_value = match &field.kind {
-        FieldKind::Noul => quote! { ::jev::Noul::try_new(answers.noul(#key)?)? },
-        FieldKind::Choice(ty) => quote! {
-            {
-                let __answer = answers.choice(#key)?;
-                ::jev::Choice::<#ty>::try_new(
-                    #key,
-                    &__answer.choice,
-                    __answer.confidence,
-                    __answer.probabilities.clone(),
-                )?
-            }
-        },
-        FieldKind::Score(ty) => quote! {
-            {
-                let __answer = answers.score(#key)?;
-                ::jev::Score::<#ty>::try_new(
-                    #key,
-                    __answer.score,
-                    __answer.confidence,
-                    __answer.probabilities.clone(),
-                )?
-            }
-        },
-    };
-
-    if field.optional {
-        quote! {
-            let #ident = match answers.get(#key) {
-                ::std::option::Option::None => ::std::option::Option::None,
-                ::std::option::Option::Some(_) => ::std::option::Option::Some(#build_value),
-            };
+        FieldKind::Choice(ty) => {
+            quote! { .choice(#key, #instructions, <#ty as ::jev::ChoiceOptions>::options().iter().copied()) }
         }
-    } else {
-        quote! {
-            let #ident = #build_value;
+        FieldKind::Score(ty) => {
+            quote! { .score(#key, #instructions, <#ty as ::jev::ScoreLevels>::levels().iter().map(|level| (level.key, level.description))) }
         }
     }
 }

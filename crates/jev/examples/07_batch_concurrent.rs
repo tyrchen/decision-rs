@@ -1,43 +1,30 @@
-//! Runnable example: `decide_all` over a slice of states with bounded concurrency.
-//!
-//! ```text
-//! JEV_API_KEY=sk-... cargo run --example 07_batch_concurrent --features "derive batch"
-//! ```
+//! Runnable example. Select JEV_PROVIDER and the corresponding API key.
 
-use std::num::NonZeroUsize;
-
-use jev::{Client, Decision, Noul, decide_all};
-
-/// A minimal one-question decision: is this ticket urgent?
+use anyhow::Result;
+use jev::{Client, Decision, Input, Predicate, decide_all};
 #[derive(Debug, Decision)]
-struct QuickTriage {
-    /// Does this ticket need attention within the hour?
-    is_urgent: Noul,
+struct Review {
+    /// Does the customer request a refund?
+    refund: Predicate,
 }
 
 #[tokio::main]
-async fn main() -> Result<(), jev::Error> {
-    tracing_subscriber::fmt::init();
-
-    let client = Client::from_env()?;
-    let tickets: Vec<jev::State> = vec![
-        "Site is down for all customers.".into(),
-        "Typo in the footer copyright year.".into(),
-        "Cannot log in, tried three times.".into(),
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .try_init()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let inputs = [
+        Input::try_from("Please refund me.")?,
+        Input::try_from("How do I change my password?")?,
     ];
-
-    let concurrency = NonZeroUsize::new(4).expect("4 is non-zero");
-    let results = decide_all::<QuickTriage>(&client, tickets, concurrency).await;
-
-    for (i, result) in results.into_iter().enumerate() {
+    for result in decide_all::<Review>(&Client::from_env()?, &inputs, 2).await? {
         match result {
-            Ok(triage) => println!(
-                "ticket {i}: P(urgent) = {:.2}",
-                triage.is_urgent.probability()
+            Ok(value) => tracing::info!(
+                probability = value.refund.probability().get(),
+                "batch answer"
             ),
-            Err(err) => eprintln!("ticket {i}: failed: {err}"),
+            Err(error) => tracing::error!(%error, "batch item failed"),
         }
     }
-
     Ok(())
 }

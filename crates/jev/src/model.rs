@@ -1,237 +1,173 @@
-//! Model identifiers and surface-aware wire-ID normalization.
+//! Provider-aware logical models and validated custom identifiers.
 
-use std::{borrow::Cow, fmt, str::FromStr};
+use std::{fmt, str::FromStr};
 
-use crate::{config::Surface, error::Error};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Bare (unnamespaced) System One ID for the pinned default model.
-const JEV_1_13_BARE: &str = "jev-1.13";
-/// Decisions-surface (namespaced) ID for the pinned default model.
-const JEV_1_13_NAMESPACED: &str = "typesafe/jev-1.13";
-/// Bare (unnamespaced) System One ID for the rolling-latest alias.
-const JEV_LATEST_BARE: &str = "jev-latest";
-/// Decisions-surface (namespaced) ID for the rolling-latest alias.
-const JEV_LATEST_NAMESPACED: &str = "~typesafe/jev-latest";
+use crate::{error::Error, provider::Provider};
 
-/// The context window, in tokens, shared by every known Jev model as of this release.
-const KNOWN_MODEL_CONTEXT_TOKENS: usize = 32_000;
-
-/// A Jev / System One model identifier.
-///
-/// `Model` normalizes the documented ID mapping between the two API surfaces: the
-/// Decisions surface expects an author-namespaced ID (`typesafe/jev-1.13`), while the
-/// System One surface accepts and returns bare IDs (`jev-1.13`). Use
-/// [`Model::wire_id`] to get the ID to send for a given [`Surface`].
-/// [`crate::Client`] additionally maps the pinned default to `jev-1.13.0` for
-/// [`crate::Provider::TypeSafe`], following the direct API's version convention.
-///
-/// # Examples
-///
-/// ```
-/// use jev::{Model, Surface};
-///
-/// let model = Model::Jev113;
-/// assert_eq!(model.wire_id(Surface::Decisions), "typesafe/jev-1.13");
-/// assert_eq!(model.wire_id(Surface::SystemOne), "jev-1.13");
-/// ```
+/// Validated custom model ID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+pub struct ModelId(String);
+impl TryFrom<&str> for ModelId {
+    type Error = Error;
+    fn try_from(value: &str) -> Result<Self, Error> {
+        if value.is_empty()
+            || value.len() > 128
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._:/~+-".contains(&b))
+        {
+            return Err(Error::InvalidConfiguration("invalid model ID"));
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+impl ModelId {
+    /// Exact custom model string.
+    ///
+    /// ```no_run
+    /// # fn example(value: &jev::ModelId) -> Result<(), jev::Error> {
+    /// let id = value.as_str();
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+/// A logical model; Default is resolved once against the selected provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Model {
-    /// `typesafe/jev-1.13` on the Decisions surface, `jev-1.13` on System One.
-    ///
-    /// This is [`DEFAULT_MODEL`]: pinned, not auto-updating. Thresholds are tuned
-    /// against one model's calibration, so silently following `jev-latest` would
-    /// silently re-tune every gate in production.
+    /// The selected hosted provider's default.
+    #[default]
+    Default,
+    /// Pinned Jev 1.13 version.
     Jev113,
-    /// `~typesafe/jev-latest` on the Decisions surface, `jev-latest` on System One.
-    ///
-    /// Tracks the newest release. Intended for exploratory work, not for a service
-    /// with tuned thresholds.
-    Latest,
-    /// Any other System One model ID, passed through unchanged on every surface.
-    Custom(String),
+    /// Explicit rolling Jev alias.
+    JevLatest,
+    /// `OpenAI` GPT-6 Luna; the alias does not promise fixed weights.
+    Gpt6Luna,
+    /// A validated, uninterpreted model identifier.
+    Custom(ModelId),
 }
-
-/// The pinned default model. A bump is one reviewable line, deliberately never
-/// [`Model::Latest`]. See [`Model::Jev113`] for the rationale.
-pub const DEFAULT_MODEL: Model = Model::Jev113;
-
 impl Model {
-    /// The identifier to send on the wire for the given [`Surface`].
-    ///
-    /// [`Model::Custom`] is never rewritten: the caller owns the exact string they
-    /// provided, on every surface.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use jev::{Model, Surface};
-    ///
-    /// let custom = Model::Custom("acme/experimental".to_string());
-    /// assert_eq!(custom.wire_id(Surface::Decisions), "acme/experimental");
-    /// assert_eq!(custom.wire_id(Surface::SystemOne), "acme/experimental");
-    /// ```
-    #[must_use]
-    pub fn wire_id(&self, surface: Surface) -> Cow<'_, str> {
-        match (self, surface) {
-            (Model::Jev113, Surface::Decisions) => Cow::Borrowed(JEV_1_13_NAMESPACED),
-            (Model::Jev113, Surface::SystemOne) => Cow::Borrowed(JEV_1_13_BARE),
-            (Model::Latest, Surface::Decisions) => Cow::Borrowed(JEV_LATEST_NAMESPACED),
-            (Model::Latest, Surface::SystemOne) => Cow::Borrowed(JEV_LATEST_BARE),
-            (Model::Custom(id), _) => Cow::Borrowed(id.as_str()),
-        }
-    }
-
-    /// The model's context window, in tokens, used for a cheap pre-flight size check.
-    ///
-    /// Returns `None` for [`Model::Custom`], since the SDK has no data for it; the
-    /// context-size guard is skipped in that case and the server remains authoritative.
-    #[must_use]
-    pub fn context_tokens(&self) -> Option<usize> {
-        match self {
-            Model::Jev113 | Model::Latest => Some(KNOWN_MODEL_CONTEXT_TOKENS),
-            Model::Custom(_) => None,
-        }
+    pub(crate) fn resolve(&self, provider: Option<Provider>) -> Result<(Self, String), Error> {
+        let model = if *self == Self::Default {
+            match provider {
+                Some(Provider::OpenAi) => Self::Gpt6Luna,
+                Some(_) => Self::Jev113,
+                None => return Err(Error::UnsupportedModel),
+            }
+        } else {
+            self.clone()
+        };
+        let wire = match (&model, provider) {
+            (Self::Gpt6Luna, Some(Provider::OpenAi)) => "gpt-6-luna".to_owned(),
+            (Self::Jev113, Some(Provider::OpenRouter)) => "typesafe/jev-1.13".to_owned(),
+            (Self::Jev113, Some(Provider::TypeSafe)) => "jev-1.13.0".to_owned(),
+            (Self::JevLatest, Some(Provider::OpenRouter)) => "~typesafe/jev-latest".to_owned(),
+            (Self::JevLatest, Some(Provider::TypeSafe)) => "jev-latest".to_owned(),
+            (Self::Custom(id), _) => {
+                if built_in(id.as_str()).is_some() {
+                    return Err(Error::InvalidConfiguration(
+                        "use built-in variant for known model",
+                    ));
+                }
+                id.as_str().to_owned()
+            }
+            _ => return Err(Error::UnsupportedModel),
+        };
+        Ok((model, wire))
     }
 }
-
-impl fmt::Display for Model {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Model::Jev113 => f.write_str(JEV_1_13_NAMESPACED),
-            Model::Latest => f.write_str(JEV_LATEST_NAMESPACED),
-            Model::Custom(id) => f.write_str(id),
-        }
+fn built_in(value: &str) -> Option<Model> {
+    match value {
+        "default" => Some(Model::Default),
+        "gpt-6-luna" => Some(Model::Gpt6Luna),
+        "jev-1.13" | "jev-1.13.0" | "typesafe/jev-1.13" => Some(Model::Jev113),
+        "jev-latest" | "~typesafe/jev-latest" => Some(Model::JevLatest),
+        _ => None,
     }
 }
-
 impl FromStr for Model {
     type Err = Error;
-
-    /// Parses a model ID in either its bare or namespaced form.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use jev::Model;
-    ///
-    /// assert_eq!("jev-1.13".parse::<Model>().unwrap(), Model::Jev113);
-    /// assert_eq!("typesafe/jev-1.13".parse::<Model>().unwrap(), Model::Jev113);
-    /// assert_eq!("~typesafe/jev-latest".parse::<Model>().unwrap(), Model::Latest);
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Invalid`] when `s` is empty.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.is_empty() {
-            return Err(Error::Invalid {
-                field: "model".to_string(),
-                reason: "model id must not be empty".to_string(),
-            });
-        }
-        Ok(match s {
-            JEV_1_13_BARE | JEV_1_13_NAMESPACED => Model::Jev113,
-            JEV_LATEST_BARE | JEV_LATEST_NAMESPACED => Model::Latest,
-            other => Model::Custom(other.to_string()),
+    fn from_str(value: &str) -> Result<Self, Error> {
+        built_in(value).map_or_else(|| ModelId::try_from(value).map(Self::Custom), Ok)
+    }
+}
+impl fmt::Display for Model {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Default => "default",
+            Self::Gpt6Luna => "gpt-6-luna",
+            Self::Jev113 => "jev-1.13",
+            Self::JevLatest => "jev-latest",
+            Self::Custom(id) => id.as_str(),
         })
     }
 }
-
-impl fmt::Display for Surface {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Surface::Decisions => f.write_str("decisions"),
-            Surface::SystemOne => f.write_str("systemOne"),
-        }
+impl Serialize for Model {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+impl<'de> Deserialize<'de> for Model {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d)?
+            .parse()
+            .map_err(|_| serde::de::Error::custom("invalid model"))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
+    use rstest::rstest;
 
     use super::*;
-
-    #[test]
-    fn test_should_map_jev113_wire_id_per_surface() {
-        assert_eq!(
-            Model::Jev113.wire_id(Surface::Decisions),
-            "typesafe/jev-1.13"
-        );
-        assert_eq!(Model::Jev113.wire_id(Surface::SystemOne), "jev-1.13");
+    #[rstest]
+    #[case(Provider::OpenAi, Model::Default, "gpt-6-luna")]
+    #[case(Provider::OpenRouter, Model::Default, "typesafe/jev-1.13")]
+    #[case(Provider::TypeSafe, Model::Default, "jev-1.13.0")]
+    #[case(Provider::OpenRouter, Model::JevLatest, "~typesafe/jev-latest")]
+    #[case(Provider::TypeSafe, Model::JevLatest, "jev-latest")]
+    fn test_should_resolve_model_namespaces(
+        #[case] provider: Provider,
+        #[case] model: Model,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(model.resolve(Some(provider)).unwrap().1, expected);
     }
-
-    #[test]
-    fn test_should_map_latest_wire_id_per_surface() {
-        assert_eq!(
-            Model::Latest.wire_id(Surface::Decisions),
-            "~typesafe/jev-latest"
-        );
-        assert_eq!(Model::Latest.wire_id(Surface::SystemOne), "jev-latest");
+    #[rstest]
+    #[case("gpt-6-luna")]
+    #[case("jev-1.13")]
+    #[case("jev-1.13.0")]
+    #[case("typesafe/jev-1.13")]
+    #[case("jev-latest")]
+    #[case("~typesafe/jev-latest")]
+    #[case("default")]
+    fn test_should_reject_builtin_custom_bypass(#[case] id: &str) {
+        let model = Model::Custom(ModelId::try_from(id).unwrap());
+        assert!(model.resolve(Some(Provider::OpenAi)).is_err());
+        assert!(model.resolve(None).is_err());
     }
-
     #[test]
-    fn test_should_never_rewrite_custom_model() {
-        let custom = Model::Custom("acme/model-x".to_string());
-        assert_eq!(custom.wire_id(Surface::Decisions), "acme/model-x");
-        assert_eq!(custom.wire_id(Surface::SystemOne), "acme/model-x");
-    }
-
-    #[test]
-    fn test_should_default_to_pinned_jev113_not_latest() {
-        assert_eq!(DEFAULT_MODEL, Model::Jev113);
-    }
-
-    #[test]
-    fn test_should_parse_bare_and_namespaced_ids() {
-        assert_eq!("jev-1.13".parse::<Model>().unwrap(), Model::Jev113);
-        assert_eq!("typesafe/jev-1.13".parse::<Model>().unwrap(), Model::Jev113);
-        assert_eq!("jev-latest".parse::<Model>().unwrap(), Model::Latest);
-        assert_eq!(
-            "~typesafe/jev-latest".parse::<Model>().unwrap(),
-            Model::Latest
-        );
-    }
-
-    #[test]
-    fn test_should_parse_unknown_id_as_custom() {
-        assert_eq!(
-            "acme/model-x".parse::<Model>().unwrap(),
-            Model::Custom("acme/model-x".to_string())
-        );
-    }
-
-    #[test]
-    fn test_should_reject_empty_model_string() {
-        assert!("".parse::<Model>().is_err());
-    }
-
-    #[test]
-    fn test_should_report_context_tokens_for_known_models_only() {
-        assert_eq!(Model::Jev113.context_tokens(), Some(32_000));
-        assert_eq!(Model::Latest.context_tokens(), Some(32_000));
-        assert_eq!(Model::Custom("x".into()).context_tokens(), None);
-    }
-
-    proptest! {
-        #[test]
-        fn test_should_round_trip_display_and_from_str_for_custom(id in "[a-z][a-z0-9_/.~-]{1,40}") {
-            // Avoid colliding with the two reserved canonical forms, which is not a
-            // round-trip failure but a deliberate, documented normalization.
-            prop_assume!(!matches!(id.as_str(), "jev-1.13" | "typesafe/jev-1.13" | "jev-latest" | "~typesafe/jev-latest"));
-            let model = Model::Custom(id.clone());
-            let displayed = model.to_string();
-            let parsed: Model = displayed.parse().unwrap();
-            prop_assert_eq!(parsed, Model::Custom(id));
+    fn test_should_preserve_custom_models_and_validate_identifiers() {
+        let model: Model = "vendor/custom-1.0".parse().unwrap();
+        for provider in [
+            Some(Provider::OpenAi),
+            Some(Provider::OpenRouter),
+            Some(Provider::TypeSafe),
+            None,
+        ] {
+            assert_eq!(model.resolve(provider).unwrap().1, "vendor/custom-1.0");
         }
-
-        #[test]
-        fn test_should_round_trip_display_and_from_str_for_canonical_models(pick in 0usize..2) {
-            let model = if pick == 0 { Model::Jev113 } else { Model::Latest };
-            let displayed = model.to_string();
-            let parsed: Model = displayed.parse().unwrap();
-            prop_assert_eq!(parsed, model);
+        for id in ["", "bad model", "a?b", "模型", "\n"] {
+            assert!(id.parse::<Model>().is_err());
         }
+        assert!("a".repeat(129).parse::<Model>().is_err());
     }
 }

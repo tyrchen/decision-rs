@@ -1,4 +1,4 @@
-error: unsupported `Decision` field type; expected `Noul`, `Choice<T>`, `Score<T>`, or `Option<_>` of one of those
+error: unsupported `Decision` field type; expected `Predicate`, `Choice<T>`, `Score<T>`, or `Outcome<_>` of one of those
  --> tests/derive-fail/unsupported_field_type.rs:7:11
   |
 7 |     flag: String,

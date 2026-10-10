@@ -1,5 +1,5 @@
-error: an `Option<_>` field requires `#[jev(optional)]`, so a missing answer is a deliberate, documented choice rather than an accident
- --> tests/derive-fail/option_without_optional_attr.rs:7:5
+error: unsupported `Decision` field type; expected `Predicate`, `Choice<T>`, `Score<T>`, or `Outcome<_>` of one of those
+ --> tests/derive-fail/option_without_optional_attr.rs:7:13
   |
-7 |     is_bug: Option<Noul>,
-  |     ^^^^^^
+7 |     is_bug: Option<Predicate>,
+  |             ^^^^^^^^^^^^^^^^^

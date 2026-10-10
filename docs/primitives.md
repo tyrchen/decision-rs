@@ -1,131 +1,62 @@
-# The three primitives
+# Decision primitives
 
-Jev answers exactly three kinds of question. Each has a dedicated Rust type with
-disjoint accessors, so a `noul` question can never be read as a `choice`, and vice
-versa — the compiler enforces the primitive, not a runtime `match`.
+Every backend returns the same checked answer types. `Probability::try_from(f64)`
+rejects NaN, infinities and values outside `0..=1`; public thresholds use this type.
 
-## `Noul` — does this condition hold?
+`Predicate::probability` reports P(true). `is_yes(gate)` tests P(true), and
+`is_no(gate)` tests P(false). `decide(yes_gate, no_gate)` returns `Yes`, `No` or
+`Unsure`; overlapping gates also return Unsure. Two branch descriptions in
+`#[jev(yes = "...", no = "...")]` remain intact on each backend. OpenAI internally
+uses a boolean choice for that form and extracts P(true).
 
-```rust
-use jev::{Decision, Noul};
+`Choice<T>` uses a documented fieldless `ChoiceOptions` enum. `value()` borrows the
+selected variant and `into_value()` consumes it. `probability_of(&variant)` reads
+the reported event probability. `accept(gate)` uses the selected event probability;
+`accept_confidence(gate)` uses separately reported confidence. Neither substitutes
+one statistic for the other. `sample(roll)` normalizes only sampling mass for
+rounding and errors when the distribution is unavailable.
 
-/// A support ticket triage decision.
-#[derive(Debug, Decision)]
-struct Triage {
-    /// Is the customer reporting a software defect?
-    #[jev(yes = "The customer describes broken or unexpected product behavior.",
-          no  = "The customer is asking a question or requesting a feature.")]
-    is_bug: Noul,
-}
-```
-
-The field's doc comment becomes `instructions`; `#[jev(yes = ..., no = ...)]` becomes
-the optional per-branch criteria (both or neither — one without the other is a
-compile error). At runtime:
-
-```rust
-# use jev::Noul;
-# let is_bug = Noul::try_new(0.92).unwrap();
-assert!(is_bug.probability() > 0.5);   // the raw P(yes)
-assert!(is_bug.is_yes(0.9));            // P(yes) >= 0.9
-assert!(!is_bug.is_no(0.9));            // P(yes) <= 0.1
-
-// Escalate the ambiguous band instead of guessing:
-match is_bug.decide(0.9, 0.9) {
-    Some(true) => { /* confirmed bug */ }
-    Some(false) => { /* confirmed not-a-bug */ }
-    None => { /* ambiguous: route to a human */ }
-}
-```
-
-## `Choice<T>` — which one of these options?
+`Score<T>` uses a documented ordered `ScoreLevels` enum. Each `LevelSpec` retains a
+stable key and description. `raw()` preserves the continuous score; `normalized()`
+scales to `0..=1`. `nearest()` rounds halves upwards and returns a checked enum,
+which can differ from the distribution's most probable level. `at_least(&level)`
+compares the continuous score. `confident(gate)` tests native confidence only.
 
 ```rust
-use jev::{Choice, ChoiceOptions, Decision};
-
-/// Owning team for a ticket.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ChoiceOptions)]
+use jev::{Choice, ChoiceOptions, Decision, Outcome, Predicate, Score, ScoreLevels};
+#[derive(Debug, ChoiceOptions)]
 enum Team {
-    /// Checkout, billing, or payment processing issues.
-    Payments,
-    /// Rendering, layout, or browser compatibility issues.
-    Frontend,
-    /// Login, permissions, or profile issues.
-    Account,
+    /// Payments and refunds.
+    Billing,
+    /// Product failures.
+    Technical,
 }
-
-#[derive(Debug, Decision)]
-struct Triage {
-    /// Which team should own this ticket?
-    team: Choice<Team>,
-}
-```
-
-`ChoiceOptions`'s wire key defaults to `snake_case` of the variant name
-(`Payments` → `"payments"`), overridable with `#[jev(key = "...")]` per variant or
-`#[jev(rename_all = "kebab-case")]` for the whole enum. Criteria come from each
-variant's doc comment — required, since `choice` cannot be built without criteria.
-
-```rust
-# use jev::{Choice, ChoiceOptions};
-# #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-# enum Team { Payments, Frontend }
-# impl ChoiceOptions for Team {
-#     fn options() -> &'static [(&'static str, &'static str)] { &[("payments", "Billing."), ("frontend", "UI.")] }
-#     fn from_key(key: &str) -> Option<Self> { match key { "payments" => Some(Team::Payments), "frontend" => Some(Team::Frontend), _ => None } }
-#     fn key(&self) -> &'static str { match self { Team::Payments => "payments", Team::Frontend => "frontend" } }
-# }
-# let team = Choice::<Team>::try_new("team", "payments", Some(0.88), Default::default()).unwrap();
-if let Some(team) = team.accept(0.7) {
-    println!("route to {team:?}");
-} else {
-    println!("ambiguous, escalate");
-}
-```
-
-An option the server returns that isn't in your enum is
-[`Error::UnknownChoice`](../crates/jev/src/error.rs) — a named error, not a silent
-`match` fallthrough.
-
-## `Score<T>` — where on an ordered scale?
-
-```rust
-use jev::{Decision, Score, ScoreLevels};
-
-/// Ordered urgency scale, lowest first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ScoreLevels)]
+#[derive(Debug, ScoreLevels)]
 enum Urgency {
-    /// Can wait for the next release.
-    NextRelease,
-    /// Should be fixed this week.
-    ThisWeek,
-    /// Blocking revenue right now.
-    BlockingRevenue,
+    /// Can wait for ordinary support.
+    Low,
+    /// Immediate attention is required.
+    High,
 }
-
 #[derive(Debug, Decision)]
 struct Triage {
-    /// How urgent is this ticket?
+    /// Does the customer report a defect?
+    defect: Predicate,
+    /// Which team should help?
+    team: Outcome<Choice<Team>>,
+    /// How urgent is the request?
     urgency: Score<Urgency>,
 }
 ```
 
-**Declaration order is the scale, lowest first.** Reordering variants silently
-changes the meaning of every threshold tuned against the old order — this is
-documented loudly on the derive and worth repeating here.
+`Outcome<T>` preserves an explicit `Refused(Refusal)` beside normal answers.
+Ordinary fields instead cause `Error::Refused` containing all required refused
+question keys and response metadata. Missing/unknown/duplicate answers and malformed
+statistics are protocol errors even for Outcome fields.
 
-```rust
-# use jev::{Score, ScoreLevels};
-# #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-# enum Urgency { NextRelease, ThisWeek, BlockingRevenue }
-# impl ScoreLevels for Urgency {
-#     fn levels() -> &'static [&'static str] { &["Can wait.", "This week.", "Blocking."] }
-#     fn from_index(i: usize) -> Option<Self> { match i { 0 => Some(Urgency::NextRelease), 1 => Some(Urgency::ThisWeek), 2 => Some(Urgency::BlockingRevenue), _ => None } }
-#     fn index(&self) -> usize { match self { Urgency::NextRelease => 0, Urgency::ThisWeek => 1, Urgency::BlockingRevenue => 2 } }
-# }
-# let urgency = Score::<Urgency>::try_new("urgency", 1.9, Some(0.8), Default::default()).unwrap();
-let level: Urgency = urgency.nearest();       // the nearest discrete level
-let raw = urgency.raw();                       // e.g. 1.9 — probability-weighted position
-let normalized = urgency.normalized();         // raw() / (levels - 1), in 0.0..=1.0
-assert!(urgency.at_least(&Urgency::ThisWeek)); // raw() >= ThisWeek.index()
-```
+Dynamic schemas use `Questions::builder().predicate(...).choice(...).score(...).build()`.
+`Client::ask(input, &questions)` returns `DecisionResponse`; `answers.decode::<T>(key)`
+provides the same checked conversion. Answers iterate in schema declaration order.
+Optional Jev distributions become `Distribution::Unavailable`; reported distributions
+must be complete and sum to one within 0.001. Scores must agree with the normalized
+weighted mean within `0.001 * max(1, levels - 1)`. Reported values are preserved.

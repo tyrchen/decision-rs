@@ -1,5 +1,8 @@
 # Migrating to 0.3
 
+> Historical 0.3 migration guide. For the current package, imports, attributes and
+> environment variables, apply the [0.4 migration guide](migration-v0.4.md) as well.
+
 This release directly replaces the Jev-specific public API with provider-neutral
 decisions. Package name remains `jev-typed`, library import remains `jev`. No deprecated
 aliases are retained. Rust 1.99 is required; the workspace version becomes 0.3.0.

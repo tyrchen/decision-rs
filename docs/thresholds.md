@@ -6,8 +6,8 @@ models equally calibrated. Native confidence and selected-event probability are
 separate statistics, even when some responses happen to return equal numbers.
 
 ```rust,no_run
-# async fn run(client: jev::Client) -> Result<(), jev::Error> {
-use jev::{Decision, Predicate, Probability, Verdict};
+# async fn run(client: decision_rs::Client) -> Result<(), decision_rs::Error> {
+use decision_rs::{Decision, Predicate, Probability, Verdict};
 #[derive(Debug, Decision)]
 struct Review {
     /// Does the customer explicitly request a refund?

@@ -1,6 +1,6 @@
 # Jev Rust SDK — Implementation Review
 
-> Historical v0.1 review. See the [v0.3 verification](unified-decision-backends-verification.md) for the current implementation.
+> Historical v0.1 review. See the [v0.3 verification](unified-decision-backends-verification.md) for the original unified implementation. The current names are documented in the [0.4 migration guide](../docs/migration-v0.4.md).
 
 
 **Status**: Final

@@ -6,10 +6,10 @@ test:
 	@cargo test --workspace --all-features
 
 test-no-retry:
-	@cargo test -p jev-typed --no-default-features --features derive --test wire
+	@cargo test -p decision-rs --no-default-features --features derive --test wire
 
 test-concurrency:
-	@cargo nextest run -p jev-typed --all-features --test wire -E 'test(test_should_include_semaphore_wait_in_deadline_across_clones)' --stress-count 100
+	@cargo nextest run -p decision-rs --all-features --test wire -E 'test(test_should_include_semaphore_wait_in_deadline_across_clones)' --stress-count 100
 
 test-live:
 	@cargo nextest run --all-features -- --ignored
@@ -23,7 +23,7 @@ lint-boundaries:
 	@cargo clippy --workspace --lib --all-features -- -D warnings -W clippy::pedantic -W clippy::unwrap_used -W clippy::expect_used -W clippy::indexing_slicing -W clippy::panic
 
 feature-check:
-	@cargo hack --feature-powerset --no-dev-deps check -p jev-typed
+	@cargo hack --feature-powerset --no-dev-deps check -p decision-rs
 
 audit:
 	@cargo audit

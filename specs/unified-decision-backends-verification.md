@@ -1,5 +1,8 @@
 # 统一决策后端实现与验证
 
+> Historical 0.3 verification record. Package names and commands below describe that
+> revision; see the [0.4 migration guide](../docs/migration-v0.4.md) for current names.
+
 日期：2026 年 10 月 9 日。目标版本：0.3。设计依据：[统一决策后端设计](./unified-decision-backends-design.md)。
 
 ## 实现结果

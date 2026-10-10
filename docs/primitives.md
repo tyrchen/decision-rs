@@ -6,7 +6,7 @@ rejects NaN, infinities and values outside `0..=1`; public thresholds use this t
 `Predicate::probability` reports P(true). `is_yes(gate)` tests P(true), and
 `is_no(gate)` tests P(false). `decide(yes_gate, no_gate)` returns `Yes`, `No` or
 `Unsure`; overlapping gates also return Unsure. Two branch descriptions in
-`#[jev(yes = "...", no = "...")]` remain intact on each backend. OpenAI internally
+`#[decision(yes = "...", no = "...")]` remain intact on each backend. OpenAI internally
 uses a boolean choice for that form and extracts P(true).
 
 `Choice<T>` uses a documented fieldless `ChoiceOptions` enum. `value()` borrows the
@@ -23,7 +23,7 @@ which can differ from the distribution's most probable level. `at_least(&level)`
 compares the continuous score. `confident(gate)` tests native confidence only.
 
 ```rust
-use jev::{Choice, ChoiceOptions, Decision, Outcome, Predicate, Score, ScoreLevels};
+use decision_rs::{Choice, ChoiceOptions, Decision, Outcome, Predicate, Score, ScoreLevels};
 #[derive(Debug, ChoiceOptions)]
 enum Team {
     /// Payments and refunds.

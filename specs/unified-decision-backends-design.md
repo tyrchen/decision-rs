@@ -1,10 +1,10 @@
 # 统一决策后端设计
 
-状态：已实现，目标版本 0.3。日期：2026 年 10 月 9 日。测试结果、实现细节与在线验证边界见 [验证记录](./unified-decision-backends-verification.md)。
+状态：已实现，目标版本 0.4。日期：2026 年 10 月 9 日。测试结果、实现细节与在线验证边界见 [验证记录](./unified-decision-backends-verification.md)。
 
-将 jev-typed 扩展为统一的 typed decision SDK，支持 OpenAI Decisions、OpenRouter Jev、TypeSafe Jev 与自托管 System One。业务代码声明一次问题，用同一种调用方式得到同一种答案；provider 选择仅出现在 client 构造或配置处。内部负责模型解析、协议编译、答案关联、校验和错误转换。
+将 decision-rs 扩展为统一的 typed decision SDK，支持 OpenAI Decisions、OpenRouter Jev、TypeSafe Jev 与自托管 System One。业务代码声明一次问题，用同一种调用方式得到同一种答案；provider 选择仅出现在 client 构造或配置处。内部负责模型解析、协议编译、答案关联、校验和错误转换。
 
-本设计取代 [原设计](./jev-sdk-design.md) 中关于公共 wire 类型、surface、默认模型、optional 答案与透传字段的契约。允许直接移除旧 API，不增加 deprecated 别名。包名 `jev-typed`、Rust 导入名 `jev` 和 workspace 划分保持不变。研究依据见 [OpenAI Decisions 集成研究](../docs/research/openai-decisions.md)。
+本设计取代 [原设计](./jev-sdk-design.md) 中关于公共 wire 类型、surface、默认模型、optional 答案与透传字段的契约。允许直接移除旧 API，不增加 deprecated 别名。0.4 将包名改为 `decision-rs`、Rust 导入名改为 `decision_rs`，derive crate 为 `decision-macros`；workspace crate 目录与包名一致。改名详情见 [0.4 迁移指南](../docs/migration-v0.4.md)。研究依据见 [OpenAI Decisions 集成研究](../docs/research/openai-decisions.md)。
 
 ## 目标与范围
 
@@ -17,12 +17,12 @@
 下面是已实现的 API 示例。其他后端只需替换构造语句，业务部分完全相同。
 
 ```rust
-use jev::{Choice, ChoiceOptions, Client, Decision, Predicate, Probability};
+use decision_rs::{Choice, ChoiceOptions, Client, Decision, Predicate, Probability};
 
 #[derive(Debug, Decision)]
 struct Triage {
     /// Is the customer reporting a defect?
-    #[jev(yes = "Reports broken product behavior.",
+    #[decision(yes = "Reports broken product behavior.",
           no = "Asks a question or requests a feature.")]
     is_bug: Predicate,
     /// Which team should handle the ticket?
@@ -39,7 +39,7 @@ enum Team {
     Other,
 }
 
-async fn triage(key: String, ticket: &str) -> Result<Triage, jev::Error> {
+async fn triage(key: String, ticket: &str) -> Result<Triage, decision_rs::Error> {
     let client = Client::openai(key)?;
     let answer: Triage = client.decide(ticket).await?;
     let gate = Probability::try_from(0.9)?;
@@ -90,11 +90,11 @@ Client 建立后保存 `ResolvedBackend`，包括目标、协议、已解析模�
 
 ### 环境与 YAML
 
-保留 `JEV_PROVIDER`、`JEV_API_KEY`、`JEV_MODEL`；provider key 包括 `OPENAI_API_KEY`、`OPENROUTER_API_KEY`、`TYPESAFE_API_KEY`。环境规则：
+SDK 环境变量改为 `DECISION_PROVIDER`、`DECISION_API_KEY`、`DECISION_MODEL`；provider key 包括 `OPENAI_API_KEY`、`OPENROUTER_API_KEY`、`TYPESAFE_API_KEY`。环境规则：
 
-1. 有 `JEV_PROVIDER` 时，使用非空 `JEV_API_KEY`，否则使用所选 provider key；不读取其他 provider key 作为 fallback。
+1. 有 `DECISION_PROVIDER` 时，使用非空 `DECISION_API_KEY`，否则使用所选 provider key；不读取其他 provider key 作为 fallback。
 2. 无 provider 时，仅一个非空 provider key 可以自动推断 provider；零个报 MissingCredentials，多个报 AmbiguousProvider。
-3. 无 provider 但存在非空 `JEV_API_KEY` 报 AmbiguousProvider，不猜测通用密钥的归属。
+3. 无 provider 但存在非空 `DECISION_API_KEY` 报 AmbiguousProvider，不猜测通用密钥的归属。
 4. 出现的空白 key、无效 provider 或 model 立即报配置错误，不跳过后尝试另一个密钥。
 5. 未配置 model 使用 Default；配置 model 走相同解析和兼容性校验。
 
@@ -133,11 +133,11 @@ Auth 是 `ApiKey(SecretString)` 或 `None`；None 仅限显式 custom endpoint�
 
 公共原语改为 `Predicate`、`Choice<T>`、`Score<T>`，去除 Jev 的 Noul 名称。Question 是字段私有的公共只读结构，Kind 是内部枚举；调用方通过 builder 与 derive 建立 schema，不直接构造可绕过验证的枚举字段。Questions 的公共 iter/get 返回只读视图。
 
-Choice 保留稳定字符串 key 和描述；Score 每个 level 同时保存稳定 key 和描述。两者 key 默认由 enum variant 转成 snake_case，均支持 `#[jev(key = "...")]`。`ScoreLevels::levels()` 改为有序的 `LevelSpec`，包含 key 与 description；声明顺序仍是评分尺度，下标从零开始。
+Choice 保留稳定字符串 key 和描述；Score 每个 level 同时保存稳定 key 和描述。两者 key 默认由 enum variant 转成 snake_case，均支持 `#[decision(key = "...")]`。`ScoreLevels::levels()` 改为有序的 `LevelSpec`，包含 key 与 description；声明顺序仍是评分尺度，下标从零开始。
 
 ### derive 与动态问题
 
-保留 `#[derive(Decision, ChoiceOptions, ScoreLevels)]`、`#[jev(...)]` 和 doc comment 作为模型 instructions 的规则。Decision 字段支持 Predicate、Choice、Score 及各自的 `Outcome<T>`。移除 `Option<T>` 字段和 `#[jev(optional)]`：缺失答案是协议错误，拒答是显式状态。
+保留 `#[derive(Decision, ChoiceOptions, ScoreLevels)]`、`#[decision(...)]` 和 doc comment 作为模型 instructions 的规则。Decision 字段支持 Predicate、Choice、Score 及各自的 `Outcome<T>`。移除 `Option<T>` 字段和旧 `#[jev(optional)]`：缺失答案是协议错误，拒答是显式状态。
 
 动态 builder 提供 `predicate(key, instructions)`、`predicate_with(key, instructions, yes, no)`、`choice(key, instructions, options)`、`score(key, instructions, levels)`；build 返回已验证 Questions。动态 Score 的 LevelSpec 与 derive 共用类型，不另外解释 label。
 
@@ -340,7 +340,7 @@ criteria 在 predicate 上是成对的可选 yes/no；Choice 不接受 criteria�
 | metadata.rs / error.rs | 规范 metadata 与稳定错误类别 |
 | client.rs | 公共 API 编排，不包含供应商 JSON 字段 |
 | cases.rs / batch.rs | 规范 case 加载和有界执行，共享发送链路 |
-| jev-macros | 规范 schema/decoder 的 compile-time 生成 |
+| decision-macros | 规范 schema/decoder 的 compile-time 生成 |
 
 原 wire.rs、state.rs、guidance.rs 被对应职责替换并删除。沿用已有 reqwest、serde、thiserror、secrecy、Tokio、indexmap；优先不增加 OpenAI SDK 依赖。若实施引入新 crate，先查当前官方用法、维护状态和安全记录，再更新 lockfile 与审计；本设计本身不更新依赖版本。
 

@@ -1,5 +1,8 @@
 # Jev Rust SDK — Implementation Review
 
+> Historical v0.1 review. See the [v0.3 verification](unified-decision-backends-verification.md) for the current implementation.
+
+
 **Status**: Final
 **Date**: 2026-05-13
 **Category**: SDK / Library

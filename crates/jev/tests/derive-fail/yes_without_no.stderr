@@ -1,5 +1,5 @@
 error: `#[jev(yes = ...)]` and `#[jev(no = ...)]` must both be present or both absent
  --> tests/derive-fail/yes_without_no.rs:8:5
   |
-8 |     is_bug: Noul,
+8 |     is_bug: Predicate,
   |     ^^^^^^

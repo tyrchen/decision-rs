@@ -1,8 +1,8 @@
 [package]
 name = "jev-typed"
-description = "Typed Rust SDK for the Jev decision model: noul/choice/score primitives as types."
+description = "Provider-neutral typed decisions for OpenAI, OpenRouter and TypeSafe."
 categories = ["asynchronous", "web-programming::http-client", "api-bindings"]
-keywords = ["jev", "openrouter", "llm", "decision", "async"]
+keywords = ["jev", "openai", "llm", "decision", "async"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -29,41 +29,41 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["derive", "retry", "rustls-tls"]
 ## Re-exports `#[derive(Decision, ChoiceOptions, ScoreLevels)]` from `jev-macros`.
 derive = ["jev-macros"]
-## Bounded retry loop honouring `Retry-After`. Pulls in `tokio` (`time` feature).
-retry = ["tokio/time"]
+## Bounded retry loop honouring `Retry-After`. Deadlines remain active without this feature.
+retry = []
 ## `reqwest` over `rustls` with the `aws-lc-rs` crypto backend (pure Rust).
 rustls-tls = ["reqwest/rustls"]
-## `reqwest` over the platform TLS stack (OpenSSL / Secure Transport / SChannel).
-native-tls = ["reqwest/native-tls"]
-## `decide_all` / `run_cases`, bounded-concurrency helpers over a slice of states or
+## `decide_all` / `run_cases`, bounded-concurrency helpers over a slice of inputs or
 ## cases. Pulls in `futures-util`.
 batch = ["dep:futures-util"]
 ## `CaseSet::from_yaml_str` / `CaseSet::from_file` for `.yaml`/`.yml` case files.
 ## JSON case files need no feature: `serde_json` is always a dependency.
-yaml = ["dep:serde_norway"]
+yaml = ["dep:serde-saphyr"]
 
 [dependencies]
 futures-util = { workspace = true, optional = true }
+httpdate.workspace = true
 indexmap.workspace = true
 jev-macros = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["json"] }
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_norway = { version = "0.9", optional = true }
+serde-saphyr = { workspace = true, optional = true }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["fs", "io-util", "time", "sync"] }
 tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
 proptest.workspace = true
 rstest.workspace = true
-serde_norway = "0.9"
 tokio = { workspace = true, features = [
   "rt-multi-thread",
   "macros",
   "test-util",
+  "net",
 ] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 trybuild.workspace = true
@@ -116,6 +116,7 @@ name = "wire"
 required-features = ["derive"]
 
 [lints.rust]
+rust_2024_compatibility = "warn"
 missing_docs = "warn"
 missing_debug_implementations = "warn"
 unsafe_code = "forbid"

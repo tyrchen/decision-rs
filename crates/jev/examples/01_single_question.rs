@@ -1,35 +1,24 @@
-//! Runnable example, level 1 (easiest): a single yes/no question, no derive, no
-//! struct — the smallest useful call this SDK offers.
-//!
-//! ```text
-//! JEV_API_KEY=sk-... cargo run --example 01_single_question
-//! ```
+//! Runnable example. Select JEV_PROVIDER and the corresponding API key.
+
+use anyhow::Result;
+use jev::{Client, Predicate, Questions};
 
 #[tokio::main]
-async fn main() -> Result<(), jev::Error> {
-    tracing_subscriber::fmt::init();
-
-    let client = jev::Client::from_env()?;
-
-    // `Client::noul` sends one `noul` question in one request and hands back a
-    // typed `Noul` directly — no `#[derive(Decision)]` struct needed for a single
-    // one-off question.
-    let is_refund = client
-        .noul(
-            "Customer: \"Please cancel my order and refund the charge to my card.\"",
-            "Is the customer asking for money back?",
-        )
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .try_init()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let questions = Questions::builder()
+        .predicate("refund", "Does the customer request money back?")
+        .build()?;
+    let response = Client::from_env()?
+        .ask("Please refund the duplicate payment.", &questions)
         .await?;
-
-    // `Noul` prints as a human-readable verdict via `Display`.
-    println!("{is_refund}"); // e.g. "yes, 88% sure"
-    println!("P(yes) = {:.2}", is_refund.probability());
-
-    if is_refund.is_yes(0.8) {
-        println!("-> route to billing");
-    } else {
-        println!("-> not confidently a refund; handle normally");
-    }
-
+    let refund: Predicate = response.answers.decode("refund")?;
+    tracing::info!(
+        probability = refund.probability().get(),
+        tokens = response.meta.usage.input_tokens,
+        "refund decision"
+    );
     Ok(())
 }

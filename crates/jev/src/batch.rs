@@ -1,198 +1,55 @@
-//! `decide_all` / `run_cases`: bounded-concurrency helpers over many states or cases.
-//!
-//! The API has no batch endpoint; this ships helpers instead of a fake batch
-//! surface. Feature-gated behind `batch` so the `futures-util` dependency stays
-//! opt-in.
-
-use std::num::NonZeroUsize;
+//! Bounded futures; no spawned or detached work. Results preserve input order.
 
 use futures_util::{StreamExt, stream};
 
-use crate::{
-    cases::{Case, CaseResult},
-    client::Client,
-    error::Error,
-    state::State,
-    typed::Decision,
-};
+use crate::{CaseResult, CaseSet, Client, Decision, Error, Input};
 
-/// Runs one decision per state with bounded concurrency, preserving input order.
-///
-/// Each state gets an independent request; one failure does not discard the batch —
-/// the result at index `i` corresponds to `states[i]`.
-///
-/// # Examples
-///
+fn validate(len: usize, concurrency: usize) -> Result<(), Error> {
+    if len > 10_000 || !(1..=128).contains(&concurrency) {
+        return Err(Error::InvalidInput("batch count or concurrency"));
+    }
+    Ok(())
+}
+/// Execute prepared inputs with bounded concurrency and per-item errors.
+/// # Errors
+/// Returns an outer `InvalidInput` error for excessive count or invalid concurrency.
+/// Cancellation drops all unfinished request futures.
 /// ```no_run
-/// # async fn run() -> Result<(), jev::Error> {
-/// use std::num::NonZeroUsize;
-///
-/// use jev::{Client, Decision, decide_all};
-/// # #[derive(Debug)] struct Triage;
-/// # impl Decision for Triage {
-/// #     fn questions() -> &'static jev::Questions { unimplemented!() }
-/// #     fn from_answers(_: &jev::Answers) -> Result<Self, jev::Error> { unimplemented!() }
-/// # }
-///
-/// let client = Client::from_env()?;
-/// let states = vec!["ticket one".into(), "ticket two".into()];
-/// let results = decide_all::<Triage>(&client, states, NonZeroUsize::new(4).unwrap()).await;
-/// for result in results {
-///     match result {
-///         Ok(triage) => println!("{triage:?}"),
-///         Err(err) => eprintln!("failed: {err}"),
-///     }
-/// }
+/// # async fn example<D: jev::Decision>(client: &jev::Client, inputs: &[jev::Input]) -> Result<(), jev::Error> {
+/// let results = jev::decide_all::<D>(client, inputs, 4).await?;
 /// # Ok(())
 /// # }
 /// ```
 pub async fn decide_all<D: Decision>(
     client: &Client,
-    states: Vec<State>,
-    concurrency: NonZeroUsize,
-) -> Vec<Result<D, Error>> {
-    stream::iter(states)
-        .map(|state| async move { client.decide::<D>(state).await })
-        .buffered(concurrency.get())
-        .collect()
-        .await
+    inputs: &[Input],
+    concurrency: usize,
+) -> Result<Vec<Result<D, Error>>, Error> {
+    validate(inputs.len(), concurrency)?;
+    Ok(
+        stream::iter(inputs.iter().map(|input| client.decide::<D>(input)))
+            .buffered(concurrency)
+            .collect()
+            .await,
+    )
 }
-
-/// Runs many predefined [`Case`]s (see [`crate::CaseSet`]) with bounded concurrency,
-/// preserving input order.
-///
-/// The dynamic-path counterpart of [`decide_all`]: each case supplies its own state
-/// *and* questions (loaded from a config file rather than one [`Decision`] type
-/// applied to many states), so the result carries the case's `id` instead of a typed
-/// value. One failure does not discard the batch — the result at index `i`
-/// corresponds to `cases[i]`.
-///
-/// # Examples
-///
+/// Execute a validated case set, preserving order and individual failures.
+/// # Errors
+/// Returns an outer `InvalidInput` error for invalid concurrency or excessive count.
 /// ```no_run
-/// # async fn run() -> Result<(), jev::Error> {
-/// use std::num::NonZeroUsize;
-///
-/// use jev::{CaseSet, Client, run_cases};
-///
-/// let cases = CaseSet::from_json_str(r#"{"cases": [{
-///     "id": "ticket-001",
-///     "state": "a refund ticket",
-///     "questions": {"refund": {"type": "noul", "instructions": "Refund?"}}
-/// }]}"#)?;
-/// let client = Client::from_env()?;
-/// let results = run_cases(&client, cases.as_slice(), NonZeroUsize::new(4).unwrap()).await;
-/// for result in results {
-///     match result {
-///         Ok(case) => println!("{}: {:?}", case.id, case.response.answers),
-///         Err(err) => eprintln!("failed: {err}"),
-///     }
-/// }
+/// # async fn example(client: &jev::Client, cases: &jev::CaseSet) -> Result<(), jev::Error> {
+/// let results = jev::run_cases(client, cases, 4).await?;
 /// # Ok(())
 /// # }
 /// ```
 pub async fn run_cases(
     client: &Client,
-    cases: &[Case],
-    concurrency: NonZeroUsize,
-) -> Vec<Result<CaseResult, Error>> {
-    stream::iter(cases)
-        .map(|case| async move { client.run_case(case).await })
-        .buffered(concurrency.get())
+    cases: &CaseSet,
+    concurrency: usize,
+) -> Result<Vec<Result<CaseResult, Error>>, Error> {
+    validate(cases.len(), concurrency)?;
+    Ok(stream::iter(cases.iter().map(|case| client.run_case(case)))
+        .buffered(concurrency)
         .collect()
-        .await
-}
-
-#[cfg(test)]
-mod tests {
-    use std::num::NonZeroUsize;
-
-    use secrecy::SecretString;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
-
-    use super::*;
-    use crate::{answer::Answers, question::Questions, typed::Noul};
-
-    #[derive(Debug, PartialEq)]
-    struct OneNoul {
-        flag: Noul,
-    }
-
-    impl Decision for OneNoul {
-        fn questions() -> &'static Questions {
-            static QUESTIONS: std::sync::LazyLock<Questions> = std::sync::LazyLock::new(|| {
-                Questions::builder()
-                    .noul("flag", "Is this flagged?")
-                    .build()
-                    .unwrap()
-            });
-            &QUESTIONS
-        }
-
-        fn from_answers(answers: &Answers) -> Result<Self, Error> {
-            Ok(OneNoul {
-                flag: Noul::try_new(answers.noul("flag")?)?,
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn test_should_preserve_order_and_report_per_item_results() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/alpha/decisions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "model": "typesafe/jev-1.13",
-                "usage": {"input_tokens": 1, "output_tokens": 1},
-                "answers": {"flag": {"type": "noul", "noul": 0.9}}
-            })))
-            .mount(&server)
-            .await;
-
-        let client = Client::with_http(reqwest::Client::new(), SecretString::from("key"))
-            .with_api_base(&server.uri())
-            .unwrap();
-
-        let states: Vec<State> = vec!["a".into(), "b".into(), "c".into()];
-        let results = decide_all::<OneNoul>(&client, states, NonZeroUsize::new(2).unwrap()).await;
-
-        assert_eq!(results.len(), 3);
-        for result in results {
-            assert!(result.is_ok());
-        }
-    }
-
-    #[tokio::test]
-    async fn test_should_run_cases_preserving_order_and_ids() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/alpha/decisions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "model": "typesafe/jev-1.13",
-                "usage": {"input_tokens": 1, "output_tokens": 1},
-                "answers": {"flag": {"type": "noul", "noul": 0.9}}
-            })))
-            .mount(&server)
-            .await;
-
-        let client = Client::with_http(reqwest::Client::new(), SecretString::from("key"))
-            .with_api_base(&server.uri())
-            .unwrap();
-
-        let case_set = crate::CaseSet::from_json_str(
-            r#"{"cases": [
-                {"id": "a", "state": "one", "questions": {"flag": {"type": "noul", "instructions": "Flagged?"}}},
-                {"id": "b", "state": "two", "questions": {"flag": {"type": "noul", "instructions": "Flagged?"}}}
-            ]}"#,
-        )
-        .unwrap();
-
-        let results = run_cases(&client, case_set.as_slice(), NonZeroUsize::new(2).unwrap()).await;
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].as_ref().unwrap().id, "a");
-        assert_eq!(results[1].as_ref().unwrap().id, "b");
-    }
+        .await)
 }

@@ -1,1579 +1,594 @@
-//! `Client`: the async HTTP client, retry loop, and request-building logic.
+//! Provider-neutral orchestration. No wire DTOs are exposed to applications.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{fmt, str::FromStr, sync::Arc};
 
-use reqwest::header::{AUTHORIZATION, HeaderValue};
-use secrecy::{ExposeSecret, SecretString};
-use tracing::{debug, instrument, warn};
+use secrecy::SecretString;
+use tokio::sync::Semaphore;
 
 use crate::{
-    answer::Answers,
-    cases::{Case, CaseResult},
-    config::{Config, Surface},
-    error::Error,
-    model::Model,
-    provider::Provider,
-    question::Questions,
-    state::State,
-    typed::{Choice, ChoiceOptions, Decision, Noul, Score, ScoreLevels},
-    util::estimate_tokens,
-    wire::{DecisionRequest, Response, ResponseMeta, TraceConfig},
+    Auth, Config, Decision, DecisionResponse, DecodeError, Endpoint, Error, HttpClient, Input,
+    IntoInput, Model, Provider, Questions, ResponseMeta, Settings, backend::ResponsePlan,
+    transport::Transport,
 };
 
-/// Maximum bytes read from a response body before parsing.
-///
-/// This bounds memory use against a hostile or misbehaving gateway; it is well
-/// above any legitimate Jev response, which is a small JSON object.
-const MAX_RESPONSE_BODY_BYTES: usize = 10 * 1024 * 1024;
-
-/// Environment variable read first by [`Client::from_env`].
-const ENV_API_KEY: &str = "JEV_API_KEY";
-/// Optional environment variable selecting the hosted provider.
-const ENV_PROVIDER: &str = "JEV_PROVIDER";
-/// Optional environment variable overriding the API base URL.
-const ENV_BASE_URL: &str = "JEV_BASE_URL";
-
-/// Maximum API key length, in bytes, before building an authorization header.
-const MAX_API_KEY_BYTES: usize = 4096;
-
-/// A typed decision plus the response envelope: id, model snapshot, usage, and cost.
-///
-/// [`Client::decide`] is the 90% API and deliberately drops this envelope;
-/// [`Client::decide_with`] returns `Decided<D>` for callers that record cost or the
-/// dated model snapshot.
-#[derive(Debug, Clone, PartialEq)]
+/// A typed decision together with accounting and provenance.
+#[derive(Debug)]
+#[non_exhaustive]
 pub struct Decided<D> {
-    /// The typed decision.
+    /// Decoded business value.
     pub value: D,
-    /// The response envelope: id, model snapshot, usage, cost, latency.
+    /// Metadata from the same response.
     pub meta: ResponseMeta,
 }
-
-/// Per-call request options for [`Client::decide_with`] and [`Client::raw`].
-///
-/// Fields left unset fall back to the [`Client`]'s configured defaults
-/// (`with_model`, `with_session_id`, `with_user`).
+/// Prepared input and an optional per-call model override.
 #[derive(Debug, Clone)]
-pub struct RequestOptions<'a> {
-    state: State,
-    questions: Option<&'a Questions>,
+#[non_exhaustive]
+pub struct RequestOptions {
+    input: Input,
     model: Option<Model>,
-    session_id: Option<String>,
-    user: Option<String>,
-    trace: Option<TraceConfig>,
 }
-
-impl<'a> RequestOptions<'a> {
-    /// Starts a `RequestOptions` for the given state.
-    #[must_use]
-    pub fn new(state: impl Into<State>) -> Self {
-        RequestOptions {
-            state: state.into(),
-            questions: None,
+impl RequestOptions {
+    /// Validate an input once.
+    /// # Errors
+    /// Returns `InvalidInput` for empty or oversized evidence.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let options = jev::RequestOptions::new("Please refund me.")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn new<I: IntoInput>(input: I) -> Result<Self, Error> {
+        Ok(Self {
+            input: input.try_into_input()?,
             model: None,
-            session_id: None,
-            user: None,
-            trace: None,
-        }
+        })
     }
-
-    /// Sets the questions to send. Required for [`Client::raw`]; ignored by
-    /// [`Client::decide_with`], which always uses `D::questions()`.
+    /// Override the logical model for this call without changing the client.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let options = jev::RequestOptions::new("Please refund me.")?.model(jev::Model::Default);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
-    pub fn with_questions(mut self, questions: &'a Questions) -> Self {
-        self.questions = Some(questions);
-        self
-    }
-
-    /// Overrides the client's configured model for this call only.
-    #[must_use]
-    pub fn with_model(mut self, model: Model) -> Self {
+    pub fn model(mut self, model: Model) -> Self {
         self.model = Some(model);
         self
     }
-
-    /// Sets a session identifier grouping this request with related ones
-    /// (Decisions surface only; dropped on System One).
-    #[must_use]
-    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
-        self.session_id = Some(session_id.into());
-        self
-    }
-
-    /// Sets an application-defined user identifier (Decisions surface only; dropped
-    /// on System One).
-    #[must_use]
-    pub fn with_user(mut self, user: impl Into<String>) -> Self {
-        self.user = Some(user.into());
-        self
-    }
-
-    /// Sets opaque trace configuration (Decisions surface only; dropped on System One).
-    #[must_use]
-    pub fn with_trace(mut self, trace: TraceConfig) -> Self {
-        self.trace = Some(trace);
-        self
-    }
 }
-
-/// Async client for the Jev decision model.
-///
-/// `Client` is cheap to clone (an `Arc`-backed `reqwest::Client` plus one more
-/// `Arc`), so it drops straight into shared application state — a `OnceLock`,
-/// `Arc<Client>`, or framework extension.
-///
-/// # Examples
-///
-/// ```no_run
-/// # async fn run() -> Result<(), jev::Error> {
-/// use jev::Client;
-///
-/// let client = Client::from_env()?;
-/// let questions = jev::Questions::builder()
-///     .noul("refund", "Is the customer asking for money back?")
-///     .build()
-///     .unwrap();
-/// let response = client.ask("a support ticket about a refund", &questions).await?;
-/// println!("{}", response.answers.noul("refund")?);
-/// # Ok(())
-/// # }
-/// ```
+/// Immutable backend binding. Clones share a pool and concurrency permits.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct Client {
-    http: reqwest::Client,
-    api_key: Option<SecretString>,
-    config: Arc<Config>,
+    inner: Arc<ClientInner>,
 }
-
-impl std::fmt::Debug for Client {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let api_key: &dyn std::fmt::Debug = if self.api_key.is_some() {
-            &"[REDACTED]"
-        } else {
-            &"none"
-        };
+#[derive(Debug)]
+struct ClientInner {
+    provider: Option<Provider>,
+    endpoint: Endpoint,
+    auth: Auth,
+    requested_model: Model,
+    resolved_model: Model,
+    wire_model: String,
+    transport: Transport,
+}
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Client")
-            .field("provider", &self.provider())
-            .field("api_base", &self.api_base())
-            .field("model", &self.config.model)
-            .field("surface", &self.surface())
-            .field("api_key", api_key)
-            // `http` is deliberately omitted: `reqwest::Client`'s own `Debug` output
-            // is an internal connection-pool dump, not useful application diagnostics.
+            .field("provider", &self.inner.provider)
+            .field("model", &self.inner.resolved_model)
             .finish_non_exhaustive()
     }
 }
-
+/// Builder with an explicitly required hosted provider and credential.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ClientBuilder {
+    provider: Provider,
+    key: Option<SecretString>,
+    model: Model,
+    http: Option<HttpClient>,
+    settings: Settings,
+}
+impl ClientBuilder {
+    /// Supply a credential; Debug always redacts it.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let builder = jev::Client::builder(jev::Provider::OpenAi).api_key("application-loaded-key");
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn api_key(mut self, key: impl Into<SecretString>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+    /// Select a logical model.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let builder = jev::Client::builder(jev::Provider::OpenAi).model(jev::Model::Gpt6Luna);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn model(mut self, model: Model) -> Self {
+        self.model = model;
+        self
+    }
+    /// Share an SDK-controlled connection pool.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let pool = jev::HttpClient::new()?;
+    /// let builder = jev::Client::builder(jev::Provider::OpenAi).http(pool);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn http(mut self, http: HttpClient) -> Self {
+        self.http = Some(http);
+        self
+    }
+    /// Supply runtime settings, validated by build.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let builder = jev::Client::builder(jev::Provider::OpenAi).settings(jev::Settings::default());
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn settings(mut self, settings: Settings) -> Self {
+        self.settings = settings;
+        self
+    }
+    /// Freeze and validate all configuration before any HTTP request.
+    /// # Errors
+    /// Rejects missing/invalid credentials, invalid settings or an incompatible model.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let client = jev::Client::builder(jev::Provider::OpenAi).api_key("application-loaded-key").build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn build(self) -> Result<Client, Error> {
+        let endpoint = match self.provider {
+            Provider::OpenAi => Endpoint::openai_decisions("https://api.openai.com/v1/decisions")?,
+            Provider::OpenRouter => {
+                Endpoint::jev_decisions("https://openrouter.ai/api/alpha/decisions")?
+            }
+            Provider::TypeSafe => Endpoint::system_one("https://api.typesafe.ai/v1/systemone")?,
+        };
+        Client::construct(
+            Some(self.provider),
+            endpoint,
+            Auth::ApiKey(self.key.ok_or(Error::MissingCredentials)?),
+            self.model,
+            self.http,
+            self.settings,
+        )
+    }
+}
 impl Client {
-    /// Builds an `OpenRouter` client with the supplied API key and its own connection
-    /// pool, using whichever TLS backend feature is enabled (`rustls-tls` by default).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Invalid`] when neither the `rustls-tls` nor `native-tls`
-    /// feature is enabled: with no TLS backend compiled in, this constructor cannot
-    /// build an HTTPS-capable `reqwest::Client`. Use [`Client::with_http`] with a
-    /// caller-supplied client in that configuration.
-    /// Also returns [`Error::Invalid`] for an empty key, a key over 4096 bytes,
-    /// or a key containing whitespace or non-ASCII characters.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn run(key: String) -> Result<(), jev::Error> {
-    /// let client = jev::Client::new(key)?;
-    /// assert_eq!(client.provider(), jev::Provider::OpenRouter);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn new(api_key: impl Into<SecretString>) -> Result<Self, Error> {
-        Self::openrouter(api_key)
-    }
-
-    /// Builds an `OpenRouter` client directly from an `OpenRouter` API key.
-    ///
-    /// # Errors
-    ///
-    /// Returns the construction and key-validation errors documented by [`Client::new`].
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn run(key: String) -> Result<(), jev::Error> {
-    /// let client = jev::Client::openrouter(key)?;
-    /// assert_eq!(client.api_base().as_str(), "https://openrouter.ai/");
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn openrouter(api_key: impl Into<SecretString>) -> Result<Self, Error> {
-        Self::for_provider(Provider::OpenRouter, api_key)
-    }
-
-    /// Builds a `TypeSafe` AI client directly from a `TypeSafe` API key.
-    ///
-    /// Uses `https://api.typesafe.ai/v1/systemone` and `TypeSafe` model IDs
-    /// (`jev-1.13.0` for the pinned default, `jev-latest` for [`Model::Latest`]).
-    ///
-    /// # Errors
-    ///
-    /// Returns the construction and key-validation errors documented by [`Client::new`].
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn run(key: String) -> Result<(), jev::Error> {
-    /// let client = jev::Client::typesafe(key)?;
-    /// assert_eq!(client.provider(), jev::Provider::TypeSafe);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn typesafe(api_key: impl Into<SecretString>) -> Result<Self, Error> {
-        Self::for_provider(Provider::TypeSafe, api_key)
-    }
-
-    /// Builds a client with a provider chosen at runtime and its matching API key.
-    ///
-    /// # Errors
-    ///
-    /// Returns the construction and key-validation errors documented by [`Client::new`].
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn run(key: String) -> Result<(), jev::Error> {
-    /// let client = jev::Client::for_provider(jev::Provider::TypeSafe, key)?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn for_provider(
-        provider: Provider,
-        api_key: impl Into<SecretString>,
+    fn construct(
+        provider: Option<Provider>,
+        endpoint: Endpoint,
+        auth: Auth,
+        model: Model,
+        http: Option<HttpClient>,
+        settings: Settings,
     ) -> Result<Self, Error> {
-        let config = Config {
-            provider,
-            ..Config::default()
+        settings.validate()?;
+        auth.header()?;
+        let (resolved_model, wire_model) = model.resolve(provider)?;
+        let http = match http {
+            Some(http) => http,
+            None => HttpClient::new()?,
         };
-        Self::from_config(build_http_client(config.timeout)?, api_key, config)
-    }
-
-    /// Builds a client that sends no `Authorization` header at all, for a System
-    /// One-compatible backend a caller hosts themselves.
-    ///
-    /// Some self-hosted backends (a local model server, a proxy that injects its
-    /// own credentials, a demo endpoint that takes no key) neither expect nor accept
-    /// a bearer token; every other `Client` constructor sends one unconditionally.
-    /// `base_url` may use `http://` for a loopback address without the opt-in
-    /// [`Client::with_api_base`] otherwise requires, since a backend a caller hosts
-    /// on their own machine is exactly the case that check exists to allow.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Invalid`] when neither the `rustls-tls` nor `native-tls`
-    /// feature is enabled (see [`Client::new`]), or when `base_url` fails to parse
-    /// or uses a non-`https`, non-loopback scheme.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use jev::Client;
-    ///
-    /// # fn run() -> Result<(), jev::Error> {
-    /// let client = Client::without_api_key("http://127.0.0.1:8099")?;
-    /// # let _ = client;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn without_api_key(base_url: &str) -> Result<Self, Error> {
-        let http = build_http_client(Config::default().timeout)?;
-        let client = Self {
+        let transport = Transport {
             http,
-            api_key: None,
-            config: Arc::new(Config::default()),
+            permits: Semaphore::new(settings.max_inflight),
+            settings,
         };
-        client.with_api_base(base_url)
-    }
-
-    /// Builds a client that shares a caller-owned `reqwest::Client` and connection
-    /// pool. This is the right choice inside a service that already owns an HTTP
-    /// client, and the only way to supply a custom TLS configuration (for example a
-    /// pinned internal CA), or to build with neither TLS feature enabled.
-    /// The key is validated before sending each request.
-    pub fn with_http(http: reqwest::Client, api_key: impl Into<SecretString>) -> Self {
-        Self {
-            http,
-            api_key: Some(api_key.into()),
-            config: Arc::new(Config::default()),
-        }
-    }
-
-    /// Builds a client from a caller-supplied HTTP client, API key, and [`Config`],
-    /// for the config-file path.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Invalid`] if the API key fails the validation documented
-    /// by [`Client::new`].
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn run(key: String) -> Result<(), jev::Error> {
-    /// let config = jev::Config { provider: jev::Provider::TypeSafe, ..Default::default() };
-    /// let client = jev::Client::from_config(reqwest::Client::new(), key, config)?;
-    /// assert_eq!(client.provider(), jev::Provider::TypeSafe);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn from_config(
-        http: reqwest::Client,
-        api_key: impl Into<SecretString>,
-        config: Config,
-    ) -> Result<Self, Error> {
-        let api_key = api_key.into();
-        validate_api_key(&api_key)?;
         Ok(Self {
-            http,
-            api_key: Some(api_key),
-            config: Arc::new(config),
+            inner: Arc::new(ClientInner {
+                provider,
+                endpoint,
+                auth,
+                requested_model: model,
+                resolved_model,
+                wire_model,
+                transport,
+            }),
         })
     }
-
-    /// Builds a client from environment variables, with an optional `JEV_BASE_URL`.
-    ///
-    /// `JEV_PROVIDER=openrouter|typesafe` selects the service explicitly; the key
-    /// comes from `JEV_API_KEY` or that provider's `OPENROUTER_API_KEY` /
-    /// `TYPESAFE_API_KEY`. A key belonging to the other provider is never used.
-    /// Without `JEV_PROVIDER`, keys are tried in this order: `JEV_API_KEY`
-    /// (`OpenRouter`), `OPENROUTER_API_KEY`, then `TYPESAFE_API_KEY` (`TypeSafe`).
-    ///
+    /// Construct a hosted client using its provider-aware default model.
     /// # Errors
-    ///
-    /// Returns [`Error::MissingApiKey`] when no matching key is set, or
-    /// [`Error::Invalid`] for an unknown provider, an invalid key, or an invalid
-    /// `JEV_BASE_URL` (see [`Client::with_api_base`]).
-    ///
-    /// # Examples
+    /// Rejects an invalid key or HTTP initialization failure.
+    /// ```no_run
+    /// let client = jev::Client::new(jev::Provider::OpenAi, "application-loaded-key")?;
+    /// # Ok::<(), jev::Error>(())
+    /// ```
+    pub fn new(provider: Provider, key: impl Into<SecretString>) -> Result<Self, Error> {
+        Self::builder(provider).api_key(key).build()
+    }
+    /// Start configuring a hosted client.
     ///
     /// ```no_run
-    /// # fn run() -> Result<(), jev::Error> {
-    /// // Configure TYPESAFE_API_KEY and JEV_PROVIDER=typesafe in your environment.
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let builder = jev::Client::builder(jev::Provider::OpenAi);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn builder(provider: Provider) -> ClientBuilder {
+        ClientBuilder {
+            provider,
+            key: None,
+            model: Model::Default,
+            http: None,
+            settings: Settings::default(),
+        }
+    }
+    /// Connect to `OpenAI` Decisions.
+    /// # Errors
+    /// Rejects an invalid key or HTTP initialization failure.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let client = jev::Client::openai("application-loaded-key")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn openai(key: impl Into<SecretString>) -> Result<Self, Error> {
+        Self::new(Provider::OpenAi, key)
+    }
+    /// Connect to `OpenRouter` Jev Decisions.
+    /// # Errors
+    /// Rejects an invalid key or HTTP initialization failure.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let client = jev::Client::openrouter("application-loaded-key")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn openrouter(key: impl Into<SecretString>) -> Result<Self, Error> {
+        Self::new(Provider::OpenRouter, key)
+    }
+    /// Connect to `TypeSafe` System One.
+    /// # Errors
+    /// Rejects an invalid key or HTTP initialization failure.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let client = jev::Client::typesafe("application-loaded-key")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn typesafe(key: impl Into<SecretString>) -> Result<Self, Error> {
+        Self::new(Provider::TypeSafe, key)
+    }
+    /// Bind a secret-free configuration to an application-loaded key.
+    /// # Errors
+    /// Rejects invalid configuration, key or model/provider combinations.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let client = jev::Client::from_config(jev::Config::new(jev::Provider::OpenAi), "application-loaded-key")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn from_config(config: Config, key: impl Into<SecretString>) -> Result<Self, Error> {
+        Self::builder(config.provider)
+            .api_key(key)
+            .model(config.model)
+            .settings(config.settings)
+            .build()
+    }
+    /// Infer credentials only when selection is unambiguous. `JEV_PROVIDER` selects
+    /// `JEV_API_KEY` or that provider's own key; other provider keys never fall back.
+    /// # Errors
+    /// Rejects ambiguity, blank/invalid environment values and missing selected credentials.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
     /// let client = jev::Client::from_env()?;
     /// # Ok(())
     /// # }
     /// ```
     pub fn from_env() -> Result<Self, Error> {
-        let (provider, api_key) = credentials_from_env(|name| std::env::var(name).ok())?;
-        let mut client = Self::for_provider(provider, api_key)?;
-        if let Ok(base_url) = std::env::var(ENV_BASE_URL) {
-            client = client.with_api_base(&base_url)?;
-        }
-        Ok(client)
+        Self::from_environment(|name| match std::env::var(name) {
+            Ok(value) => Ok(Some(value)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(_) => Err(Error::InvalidConfiguration("environment encoding")),
+        })
     }
-
-    /// Selects the hosted provider while preserving custom HTTP and base URL settings.
-    ///
-    /// Supply the selected provider's key at construction. `TypeSafe` always uses
-    /// System One; `OpenRouter` uses the configured surface.
-    ///
-    /// # Examples
+    fn from_environment<F: Fn(&str) -> Result<Option<String>, Error>>(
+        read: F,
+    ) -> Result<Self, Error> {
+        let generic = read("JEV_API_KEY")?;
+        if let Some(key) = &generic {
+            Auth::ApiKey(SecretString::from(key.clone())).header()?;
+        }
+        let (provider, key) = if let Some(raw) = read("JEV_PROVIDER")? {
+            let provider = Provider::from_str(&raw)?;
+            let key = match generic {
+                Some(key) => key,
+                None => read(provider.key_env())?.ok_or(Error::MissingCredentials)?,
+            };
+            (provider, key)
+        } else {
+            if generic.is_some() {
+                return Err(Error::AmbiguousProvider);
+            }
+            let mut selected = None;
+            for provider in [Provider::OpenAi, Provider::OpenRouter, Provider::TypeSafe] {
+                if let Some(key) = read(provider.key_env())? {
+                    Auth::ApiKey(SecretString::from(key.clone())).header()?;
+                    if selected.is_some() {
+                        return Err(Error::AmbiguousProvider);
+                    }
+                    selected = Some((provider, key));
+                }
+            }
+            selected.ok_or(Error::MissingCredentials)?
+        };
+        let model = read("JEV_MODEL")?
+            .map(|m| Model::from_str(&m))
+            .transpose()?
+            .unwrap_or_default();
+        Self::builder(provider).api_key(key).model(model).build()
+    }
+    /// Connect to an explicit custom endpoint; requires a Custom model ID.
+    /// # Errors
+    /// Rejects invalid auth, model or HTTP initialization.
     ///
     /// ```no_run
-    /// # fn run(key: String) -> Result<(), jev::Error> {
-    /// let client = jev::Client::with_http(reqwest::Client::new(), key)
-    ///     .with_provider(jev::Provider::TypeSafe);
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let endpoint = jev::Endpoint::system_one("http://127.0.0.1:8080/v1/systemone")?;
+    /// let client = jev::Client::for_endpoint(endpoint, jev::Auth::None, "local-model".parse()?)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn for_endpoint(endpoint: Endpoint, auth: Auth, model: Model) -> Result<Self, Error> {
+        Self::for_endpoint_with(
+            endpoint,
+            auth,
+            model,
+            HttpClient::new()?,
+            Settings::default(),
+        )
+    }
+    /// Configure a custom endpoint's pool and runtime settings.
+    /// # Errors
+    /// Rejects invalid auth, model or settings.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let endpoint = jev::Endpoint::system_one("http://127.0.0.1:8080/v1/systemone")?;
+    /// let client = jev::Client::for_endpoint_with(endpoint, jev::Auth::None, "local-model".parse()?, jev::HttpClient::new()?, jev::Settings::default())?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn for_endpoint_with(
+        endpoint: Endpoint,
+        auth: Auth,
+        model: Model,
+        http: HttpClient,
+        settings: Settings,
+    ) -> Result<Self, Error> {
+        Self::construct(None, endpoint, auth, model, Some(http), settings)
+    }
+    /// The bound provider, or None for a custom endpoint.
+    ///
+    /// ```no_run
+    /// # fn example(client: &jev::Client) -> Result<(), jev::Error> {
+    /// let value = client.provider();
     /// # Ok(())
     /// # }
     /// ```
     #[must_use]
-    pub fn with_provider(mut self, provider: Provider) -> Self {
-        self.config_mut().provider = provider;
-        self
+    pub fn provider(&self) -> Option<Provider> {
+        self.inner.provider
     }
-
-    /// The hosted provider configured for this client.
+    /// Resolved default model for this client.
     ///
-    /// # Examples
-    ///
-    /// ```
-    /// let client = jev::Client::with_http(reqwest::Client::new(), "key");
-    /// assert_eq!(client.provider(), jev::Provider::OpenRouter);
+    /// ```no_run
+    /// # fn example(client: &jev::Client) -> Result<(), jev::Error> {
+    /// let value = client.model();
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
-    pub fn provider(&self) -> Provider {
-        self.config.provider
+    pub fn model(&self) -> &Model {
+        &self.inner.resolved_model
     }
-
-    /// The effective HTTP surface. `TypeSafe` always uses System One.
-    fn surface(&self) -> Surface {
-        self.provider().surface(self.config.surface)
-    }
-
-    /// Overrides the model sent on every request made by this client.
-    #[must_use]
-    pub fn with_model(mut self, model: Model) -> Self {
-        self.config_mut().model = model;
-        self
-    }
-
-    /// Overrides the `OpenRouter` HTTP surface. `TypeSafe` always uses System One.
-    #[must_use]
-    pub fn with_surface(mut self, surface: Surface) -> Self {
-        self.config_mut().surface = surface;
-        self
-    }
-
-    /// Overrides the API base URL (scheme + host).
+    /// Cloneable shared connection pool.
     ///
+    /// ```no_run
+    /// # fn example(client: &jev::Client) -> Result<(), jev::Error> {
+    /// let value = client.http();
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn http(&self) -> &HttpClient {
+        &self.inner.transport.http
+    }
+    /// Immutable validated settings.
+    ///
+    /// ```no_run
+    /// # fn example(client: &jev::Client) -> Result<(), jev::Error> {
+    /// let value = client.settings();
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn settings(&self) -> &Settings {
+        &self.inner.transport.settings
+    }
+    /// Ask a typed question set with the client's default model.
     /// # Errors
+    /// Returns schema, transport, protocol or required-field refusal errors.
     ///
-    /// Returns [`Error::Invalid`] when `base_url` fails to parse, or uses a scheme
-    /// other than `https` (`http` is accepted only for local mocks; see the crate's
-    /// security posture docs).
-    pub fn with_api_base(mut self, base_url: &str) -> Result<Self, Error> {
-        let url = url::Url::parse(base_url).map_err(|e| Error::Invalid {
-            field: "api_base".to_string(),
-            reason: e.to_string(),
-        })?;
-        if url.scheme() != "https" && !is_local_http_opt_in(&url) {
-            return Err(Error::Invalid {
-                field: "api_base".to_string(),
-                reason: "must use https (http is only accepted for loopback addresses)".to_string(),
-            });
-        }
-        self.config_mut().api_base = Some(url);
-        Ok(self)
-    }
-
-    /// Overrides the per-request timeout (an overall deadline across all retry attempts).
-    #[must_use]
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.config_mut().timeout = timeout;
-        self
-    }
-
-    /// Overrides the retry policy.
-    #[must_use]
-    pub fn with_retry(mut self, retry: crate::config::RetryConfig) -> Self {
-        self.config_mut().retry = retry;
-        self
-    }
-
-    /// Enables or disables the pre-flight context-size estimate.
-    #[must_use]
-    pub fn with_context_check(mut self, enabled: bool) -> Self {
-        self.config_mut().context_check = enabled;
-        self
-    }
-
-    /// Sets a default session identifier applied to every request unless overridden
-    /// per-call by [`RequestOptions::with_session_id`].
-    #[must_use]
-    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
-        self.config_mut().default_session_id = Some(session_id.into());
-        self
-    }
-
-    /// Sets a default user identifier applied to every request unless overridden
-    /// per-call by [`RequestOptions::with_user`].
-    #[must_use]
-    pub fn with_user(mut self, user: impl Into<String>) -> Self {
-        self.config_mut().default_user = Some(user.into());
-        self
-    }
-
-    /// Sets the named probability thresholds this client carries for callers that
-    /// want to read them back via [`Client::thresholds`].
-    #[must_use]
-    pub fn with_thresholds(mut self, thresholds: crate::config::Thresholds) -> Self {
-        self.config_mut().thresholds = thresholds;
-        self
-    }
-
-    /// The configured probability thresholds.
-    #[must_use]
-    pub fn thresholds(&self) -> &crate::config::Thresholds {
-        &self.config.thresholds
-    }
-
-    /// The effective API base URL.
-    #[must_use]
-    pub fn api_base(&self) -> url::Url {
-        self.config.api_base.clone().unwrap_or_else(|| {
-            url::Url::parse(self.provider().api_base()).unwrap_or_else(|_| unreachable_url())
-        })
-    }
-
-    /// Typed path: sends `D::questions()`, parses the answers back into `D`.
-    ///
-    /// This is the 90% API. It deliberately drops the response envelope (id, usage,
-    /// cost); use [`Client::decide_with`] when that data is needed.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Error`] from the underlying request, or from [`Decision::from_answers`]
-    /// if the server's answers do not match `D`'s shape.
-    pub async fn decide<D: Decision>(&self, state: impl Into<State>) -> Result<D, Error> {
+    /// ```no_run
+    /// # async fn example<D: jev::Decision>(client: &jev::Client) -> Result<(), jev::Error> {
+    /// let answer: D = client.decide("Please refund me.").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn decide<D: Decision>(&self, input: impl IntoInput) -> Result<D, Error> {
         Ok(self
-            .decide_with::<D>(RequestOptions::new(state))
+            .decide_with::<D>(RequestOptions::new(input)?)
             .await?
             .value)
     }
-
-    /// Typed path with per-call knobs (session, user, trace, model override).
-    ///
+    /// Ask a typed question set and retain accounting.
     /// # Errors
+    /// Returns schema, transport, protocol or required-field refusal errors.
     ///
-    /// Any [`Error`] from the underlying request, or from [`Decision::from_answers`].
+    /// ```no_run
+    /// # async fn example<D: jev::Decision>(client: &jev::Client) -> Result<(), jev::Error> {
+    /// let answer = client.decide_with::<D>(jev::RequestOptions::new("Please refund me.")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn decide_with<D: Decision>(
         &self,
-        options: RequestOptions<'_>,
+        options: RequestOptions,
     ) -> Result<Decided<D>, Error> {
-        let questions = D::questions();
-        let (response, latency) = self.send(options, questions).await?;
-        let meta = ResponseMeta::from_response(&response, latency);
-        let value = D::from_answers(&response.answers)?;
-        Ok(Decided { value, meta })
+        let response = self.execute(options, D::questions()?).await?;
+        let value = D::from_answers(&response.answers).map_err(|error| match error {
+            DecodeError::Refused(keys) if !keys.is_empty() => Error::Refused {
+                keys,
+                meta: Box::new(response.meta.clone()),
+            },
+            DecodeError::Refused(_) => Error::protocol("empty typed refusal mapping"),
+            DecodeError::InvalidMapping { key } => {
+                Error::for_question(&key, "invalid typed mapping")
+            }
+        })?;
+        Ok(Decided {
+            value,
+            meta: response.meta,
+        })
     }
-
-    /// Dynamic path: sends caller-supplied `questions`, returns the raw answer map.
-    ///
+    /// Ask a dynamic schema with provider-neutral answers and explicit refusals.
     /// # Errors
+    /// Returns input, transport or response-validation errors.
     ///
-    /// Any [`Error`] from the underlying request.
+    /// ```no_run
+    /// # async fn example(client: &jev::Client, questions: &jev::Questions) -> Result<(), jev::Error> {
+    /// let response = client.ask("Please refund me.", questions).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn ask(
         &self,
-        state: impl Into<State>,
+        input: impl IntoInput,
         questions: &Questions,
-    ) -> Result<Response, Error> {
-        self.send(RequestOptions::new(state), questions)
-            .await
-            .map(|(response, _)| response)
+    ) -> Result<DecisionResponse, Error> {
+        self.execute(RequestOptions::new(input)?, questions).await
     }
-
-    /// Single-question convenience: asks one `noul` question and returns the typed
-    /// [`Noul`] answer directly, without a [`Decision`] struct.
-    ///
-    /// For a one-off yes/no gate that does not warrant its own struct. For more than
-    /// one question in a single request, or to keep the question and its criteria
-    /// next to a named type, use `#[derive(Decision)]` or [`Client::ask`] instead.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Invalid`] if `instructions` fails [`Questions`]'s validation (empty,
-    /// oversized); otherwise any [`Error`] from the underlying request.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # async fn run(client: &jev::Client) -> Result<(), jev::Error> {
-    /// let is_refund = client.noul("Please refund my order.", "Is this a refund request?").await?;
-    /// println!("{is_refund}"); // Display: "yes, 88% sure"
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn noul(
+    async fn execute(
         &self,
-        state: impl Into<State>,
-        instructions: impl Into<crate::guidance::Guidance>,
-    ) -> Result<Noul, Error> {
-        const KEY: &str = "noul";
-        let questions = Questions::builder().noul(KEY, instructions).build()?;
-        let response = self.ask(state, &questions).await?;
-        Noul::try_new(response.answers.noul(KEY)?)
-    }
-
-    /// Single-question convenience: asks one `choice` question over `T::options()`
-    /// and returns the typed [`Choice<T>`] answer directly, without a [`Decision`]
-    /// struct.
-    ///
-    /// `T` supplies both the wire criteria (`T::options()`) and the typed result, the
-    /// same as a `Choice<T>` field on a `#[derive(Decision)]` struct would.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Invalid`] if `instructions` fails validation; [`Error::UnknownChoice`]
-    /// if the server picks an option outside `T`; otherwise any [`Error`] from the
-    /// underlying request.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use jev::ChoiceOptions;
-    ///
-    /// #[derive(Debug, Clone, Copy, PartialEq, Eq, ChoiceOptions)]
-    /// enum Team {
-    ///     /// Billing issues.
-    ///     Payments,
-    ///     /// UI issues.
-    ///     Frontend,
-    /// }
-    ///
-    /// # async fn run(client: &jev::Client) -> Result<(), jev::Error> {
-    /// let team = client.choice::<Team>("a checkout ticket", "Which team owns this?").await?;
-    /// println!("{:?}", team.value());
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn choice<T: ChoiceOptions>(
-        &self,
-        state: impl Into<State>,
-        instructions: impl Into<crate::guidance::Guidance>,
-    ) -> Result<Choice<T>, Error> {
-        const KEY: &str = "choice";
-        let questions = Questions::builder()
-            .choice(KEY, instructions, T::options().to_vec())
-            .build()?;
-        let response = self.ask(state, &questions).await?;
-        let answer = response.answers.choice(KEY)?;
-        Choice::try_new(
-            KEY,
-            &answer.choice,
-            answer.confidence,
-            answer.probabilities.clone(),
-        )
-    }
-
-    /// Single-question convenience: asks one `score` question over `T::levels()` and
-    /// returns the typed [`Score<T>`] answer directly, without a [`Decision`] struct.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Invalid`] if `instructions` fails validation; [`Error::ScoreRange`] if
-    /// the server's score falls outside `T`'s levels; otherwise any [`Error`] from the
-    /// underlying request.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use jev::ScoreLevels;
-    ///
-    /// #[derive(Debug, Clone, Copy, PartialEq, Eq, ScoreLevels)]
-    /// enum Urgency {
-    ///     /// Can wait.
-    ///     Low,
-    ///     /// Blocking revenue.
-    ///     High,
-    /// }
-    ///
-    /// # async fn run(client: &jev::Client) -> Result<(), jev::Error> {
-    /// let urgency = client.score::<Urgency>("a checkout ticket", "How urgent is this?").await?;
-    /// println!("{:?}", urgency.nearest());
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn score<T: ScoreLevels>(
-        &self,
-        state: impl Into<State>,
-        instructions: impl Into<crate::guidance::Guidance>,
-    ) -> Result<Score<T>, Error> {
-        const KEY: &str = "score";
-        let questions = Questions::builder()
-            .score(KEY, instructions, T::levels().to_vec())
-            .build()?;
-        let response = self.ask(state, &questions).await?;
-        let answer = response.answers.score(KEY)?;
-        Score::try_new(
-            KEY,
-            answer.score,
-            answer.confidence,
-            answer.probabilities.clone(),
-        )
-    }
-
-    /// Runs one predefined [`Case`]: builds its questions, sends its state, and
-    /// returns the response tagged with the case's `id`.
-    ///
-    /// This is the config-file counterpart of [`Client::ask`]: `ask` takes questions
-    /// assembled in code, `run_case` takes both the state and the questions from a
-    /// [`Case`] loaded via [`crate::CaseSet::from_yaml_str`] /
-    /// [`crate::CaseSet::from_json_str`] / [`crate::CaseSet::from_file`]. For many
-    /// cases at once with bounded concurrency, see [`crate::run_cases`] (the `batch`
-    /// feature).
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Invalid`] if `case.questions` fails validation (this should not
-    /// happen for a `Case` obtained from a successfully loaded [`crate::CaseSet`],
-    /// which validates eagerly at load time); otherwise any [`Error`] from the
-    /// underlying request.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # async fn run(client: &jev::Client, case: &jev::Case) -> Result<(), jev::Error> {
-    /// let result = client.run_case(case).await?;
-    /// println!("{}: {:?}", result.id, result.response.answers);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn run_case(&self, case: &Case) -> Result<CaseResult, Error> {
-        let questions = case.build_questions()?;
-        let response = self.ask(case.state.clone(), &questions).await?;
-        Ok(CaseResult {
-            id: case.id.clone(),
-            response,
-        })
-    }
-
-    /// Escape hatch: full request in ([`RequestOptions::with_questions`] required),
-    /// full [`Response`] out.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Invalid`] if `options` has no questions set; otherwise any [`Error`]
-    /// from the underlying request.
-    pub async fn raw(&self, options: RequestOptions<'_>) -> Result<Response, Error> {
-        let questions = options.questions.ok_or_else(|| Error::Invalid {
-            field: "questions".to_string(),
-            reason: "Client::raw requires RequestOptions::with_questions".to_string(),
-        })?;
-        self.send(options, questions)
-            .await
-            .map(|(response, _)| response)
-    }
-
-    /// Mutable access to this client's private `Config` copy, cloning the `Arc`'s
-    /// contents on first write (copy-on-write via `Arc::make_mut`).
-    fn config_mut(&mut self) -> &mut Config {
-        Arc::make_mut(&mut self.config)
-    }
-
-    /// Sends one decision request, applying the context-size guard and the retry
-    /// loop, and returns the parsed response plus the measured latency.
-    #[instrument(
-        skip(self, options, questions),
-        fields(
-            model,
-            provider = ?self.provider(),
-            surface = ?self.surface(),
-            questions = questions.len(),
-            attempt,
-            request_id,
-            input_tokens,
-            cost,
-            latency_ms
-        )
-    )]
-    async fn send(
-        &self,
-        options: RequestOptions<'_>,
+        options: RequestOptions,
         questions: &Questions,
-    ) -> Result<(Response, Duration), Error> {
-        let model = options.model.unwrap_or_else(|| self.config.model.clone());
-        let wire_model = self
-            .provider()
-            .wire_id(&model, self.config.surface)
-            .into_owned();
-        tracing::Span::current().record("model", tracing::field::display(&wire_model));
-
-        let session_id = options
-            .session_id
-            .or_else(|| self.config.default_session_id.clone());
-        let user = options.user.or_else(|| self.config.default_user.clone());
-        let trace = options.trace;
-
-        if self.config.context_check {
-            Self::check_context_size(&model, &options.state, questions)?;
+    ) -> Result<DecisionResponse, Error> {
+        if options.input.as_str().len() > self.inner.transport.settings.limits.input_bytes {
+            return Err(Error::InvalidInput("configured evidence limit"));
         }
-
-        let url = self.request_url();
-        let start = Instant::now();
-        let result = self
-            .send_with_retry(
-                &url,
-                &wire_model,
-                &options.state,
-                questions,
-                session_id,
-                user,
-                trace,
+        let requested = options
+            .model
+            .unwrap_or_else(|| self.inner.requested_model.clone());
+        let (resolved, wire) = if requested == self.inner.requested_model {
+            (
+                self.inner.resolved_model.clone(),
+                self.inner.wire_model.clone(),
             )
-            .await;
-        let latency = start.elapsed();
-        tracing::Span::current().record(
-            "latency_ms",
-            u64::try_from(latency.as_millis()).unwrap_or(u64::MAX),
-        );
-
-        let response = result?;
-        tracing::Span::current().record("input_tokens", response.usage.input_tokens);
-        if let Some(cost) = response.usage.cost {
-            tracing::Span::current().record("cost", cost);
-        }
-        warn_on_low_confidence(&response.answers);
-
-        Ok((response, latency))
-    }
-
-    /// The context-size guard: rejects a request before spending a billed round trip
-    /// when the serialized payload is clearly too large for the model's context.
-    ///
-    /// This is a cheap heuristic (bytes / 4), not a tokenizer; the server remains
-    /// authoritative. Disable with `Client::with_context_check(false)`.
-    fn check_context_size(
-        model: &Model,
-        state: &State,
-        questions: &Questions,
-    ) -> Result<(), Error> {
-        let Some(limit) = model.context_tokens() else {
-            return Ok(());
+        } else {
+            requested.resolve(self.inner.provider)?
         };
-        let questions_bytes = serde_json::to_string(questions).map_or(usize::MAX, |s| s.len());
-        let estimated = estimate_tokens(state.byte_len() + questions_bytes);
-        if estimated > limit {
-            return Err(Error::StateTooLarge { estimated, limit });
-        }
-        Ok(())
-    }
-
-    /// The full URL for this client's configured surface.
-    fn request_url(&self) -> url::Url {
-        let mut url = self.api_base();
-        url.set_path(self.provider().path(self.config.surface));
-        url
-    }
-
-    /// Runs the bounded retry loop around a single logical request.
-    #[allow(clippy::too_many_arguments)]
-    async fn send_with_retry(
-        &self,
-        url: &url::Url,
-        wire_model: &str,
-        state: &State,
-        questions: &Questions,
-        session_id: Option<String>,
-        user: Option<String>,
-        trace: Option<TraceConfig>,
-    ) -> Result<Response, Error> {
-        let retry = self.config.retry;
-        let max_attempts = effective_max_attempts(retry.max_attempts);
-
-        let attempt_fut = async {
-            let mut last_err: Option<Error> = None;
-            for attempt in 1..=max_attempts {
-                tracing::Span::current().record("attempt", attempt);
-                let outcome = self
-                    .send_once(
-                        url,
-                        wire_model,
-                        state,
-                        questions,
-                        session_id.as_deref(),
-                        user.as_deref(),
-                        trace.as_ref(),
-                    )
-                    .await;
-
-                match outcome {
-                    Ok(response) => return Ok(response),
-                    Err(err) => {
-                        let retry_after = retry_after_from_error(&err);
-                        let retryable = err.is_retryable();
-                        last_err = Some(err);
-                        if !retryable || attempt == max_attempts {
-                            break;
-                        }
-                        sleep_before_retry(retry, attempt, retry_after).await;
-                    }
-                }
-            }
-            // `max_attempts >= 1` (enforced by `effective_max_attempts`), so the loop
-            // above always runs at least once and `last_err` is always `Some` here.
-            Err(last_err.unwrap_or(Error::Invalid {
-                field: "retry".to_string(),
-                reason: "retry loop exited without a result".to_string(),
-            }))
-        };
-
-        run_with_deadline(self.config.timeout, attempt_fut).await
-    }
-
-    /// Sends exactly one HTTP request and parses its response, without retrying.
-    #[allow(clippy::too_many_arguments)]
-    async fn send_once(
-        &self,
-        url: &url::Url,
-        wire_model: &str,
-        state: &State,
-        questions: &Questions,
-        session_id: Option<&str>,
-        user: Option<&str>,
-        trace: Option<&TraceConfig>,
-    ) -> Result<Response, Error> {
-        let (session_id, user, trace) =
-            drop_unsupported_fields(self.surface(), session_id, user, trace);
-
-        let request = DecisionRequest {
-            model: wire_model,
-            state,
+        let backend = self.inner.endpoint.backend;
+        let plan = ResponsePlan { questions };
+        let body = backend.prepare(
+            &options.input,
             questions,
-            session_id,
-            user,
-            trace,
+            &wire,
+            self.inner.transport.settings.limits.request_bytes,
+        )?;
+        let request = self
+            .inner
+            .transport
+            .request(&self.inner.endpoint, &self.inner.auth, body)?;
+        let received = self.inner.transport.send(request, backend).await?;
+        let decoded = backend.decode(&received.body, &plan)?;
+        let meta = ResponseMeta {
+            provider: self.inner.provider,
+            requested_model: requested,
+            resolved_model: resolved,
+            wire_model: wire,
+            returned_model: decoded.model,
+            request_id: received.request_id,
+            response_id: decoded.id,
+            sdk_version: env!("CARGO_PKG_VERSION"),
+            usage: decoded.usage,
+            latency: received.latency,
+            attempts: received.attempts,
         };
-        let body = serde_json::to_vec(&request).map_err(|e| Error::Invalid {
-            field: "request".to_string(),
-            reason: e.to_string(),
-        })?;
-
-        let mut request = self
-            .http
-            .post(url.clone())
-            .header(reqwest::header::CONTENT_TYPE, "application/json");
-        if let Some(api_key) = &self.api_key {
-            validate_api_key(api_key)?;
-            let mut authorization =
-                HeaderValue::from_str(&format!("Bearer {}", api_key.expose_secret())).map_err(
-                    |_| Error::Invalid {
-                        field: "api_key".to_string(),
-                        reason: "cannot be encoded as an authorization header".to_string(),
-                    },
-                )?;
-            authorization.set_sensitive(true);
-            request = request.header(AUTHORIZATION, authorization);
-        }
-        let http_response = request.body(body).send().await?;
-
-        let status = http_response.status();
-        let retry_after_secs = parse_retry_after(http_response.headers());
-        let bytes = read_capped_body(http_response).await?;
-
-        if !status.is_success() {
-            let text = String::from_utf8_lossy(&bytes);
-            return Err(Error::from_api_response(
-                status.as_u16(),
-                &text,
-                retry_after_secs,
-            ));
-        }
-
-        serde_json::from_slice(&bytes).map_err(|e| Error::Parse(e.to_string()))
-    }
-}
-
-/// Resolves credentials without mutating process environment (including in tests).
-fn credentials_from_env(
-    get: impl Fn(&str) -> Option<String>,
-) -> Result<(Provider, SecretString), Error> {
-    if let Some(name) = get(ENV_PROVIDER) {
-        let provider = name.parse::<Provider>()?;
-        let key = get(ENV_API_KEY)
-            .or_else(|| get(provider.api_key_env()))
-            .ok_or(Error::MissingApiKey)?;
-        return Ok((provider, SecretString::from(key)));
-    }
-    if let Some(key) = get(ENV_API_KEY) {
-        return Ok((Provider::OpenRouter, SecretString::from(key)));
-    }
-    for provider in [Provider::OpenRouter, Provider::TypeSafe] {
-        if let Some(key) = get(provider.api_key_env()) {
-            return Ok((provider, SecretString::from(key)));
-        }
-    }
-    Err(Error::MissingApiKey)
-}
-
-/// Rejects invalid credentials without putting the secret in diagnostics.
-fn validate_api_key(key: &SecretString) -> Result<(), Error> {
-    let key = key.expose_secret();
-    if key.is_empty() || key.len() > MAX_API_KEY_BYTES || !key.bytes().all(|b| b.is_ascii_graphic())
-    {
-        return Err(Error::Invalid {
-            field: "api_key".to_string(),
-            reason: "must contain 1..=4096 printable ASCII bytes without whitespace".to_string(),
-        });
-    }
-    Ok(())
-}
-
-/// A `Client::new`/`Client::from_config`-friendly `reqwest::Client` builder.
-///
-/// Returns [`Error::Invalid`] when neither TLS feature is enabled, since a client
-/// built this way cannot make an HTTPS request without one.
-fn build_http_client(timeout: Duration) -> Result<reqwest::Client, Error> {
-    #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
-    {
-        log_tls_backend();
-        reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(Error::Http)
-    }
-    #[cfg(not(any(feature = "rustls-tls", feature = "native-tls")))]
-    {
-        let _ = timeout;
-        Err(Error::Invalid {
-            field: "tls".to_string(),
-            reason: "Client::new requires the `rustls-tls` or `native-tls` feature; use \
-                     Client::with_http with a caller-supplied client instead"
-                .to_string(),
+        tracing::debug!(provider = ?meta.provider, model = %meta.wire_model, questions = questions.len(), attempts = meta.attempts, latency_ms = meta.latency.as_millis(), input_tokens = meta.usage.input_tokens, output_tokens = meta.usage.output_tokens, request_id = ?meta.request_id, "decision completed");
+        Ok(DecisionResponse {
+            answers: decoded.answers,
+            meta,
         })
     }
-}
-
-/// Names the effective TLS backend once, at `debug!` level, when both TLS features
-/// are enabled (Cargo feature unification can legitimately request both).
-#[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
-fn log_tls_backend() {
-    #[cfg(feature = "rustls-tls")]
-    {
-        debug!(
-            backend = "rustls",
-            "using rustls TLS backend (preferred when both are enabled)"
-        );
-    }
-    #[cfg(all(not(feature = "rustls-tls"), feature = "native-tls"))]
-    {
-        debug!(backend = "native-tls", "using native-tls TLS backend");
-    }
-}
-
-/// Clamps `max_attempts` to at least `1`, and to `1` unconditionally when the
-/// `retry` feature is disabled (no backoff machinery is compiled in).
-fn effective_max_attempts(configured: u32) -> u32 {
-    #[cfg(feature = "retry")]
-    {
-        configured.max(1)
-    }
-    #[cfg(not(feature = "retry"))]
-    {
-        let _ = configured;
-        1
-    }
-}
-
-/// Runs `fut` under an overall deadline, mapping expiry to [`Error::Timeout`].
-///
-/// Without the `retry` feature, `tokio::time` is not pulled in as a dependency of
-/// this crate's own retry loop; the per-attempt `reqwest` timeout (set at client
-/// construction) is the only bound in that configuration.
-async fn run_with_deadline<F, T>(timeout: Duration, fut: F) -> Result<T, Error>
-where
-    F: std::future::Future<Output = Result<T, Error>>,
-{
-    #[cfg(feature = "retry")]
-    {
-        let start = Instant::now();
-        match tokio::time::timeout(timeout, fut).await {
-            Ok(result) => result,
-            Err(_) => Err(Error::Timeout {
-                elapsed_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
-            }),
-        }
-    }
-    #[cfg(not(feature = "retry"))]
-    {
-        let _ = timeout;
-        fut.await
-    }
-}
-
-/// Sleeps before the next retry attempt, honouring `Retry-After` when present.
-#[cfg(feature = "retry")]
-async fn sleep_before_retry(
-    retry: crate::config::RetryConfig,
-    attempt: u32,
-    retry_after: Option<Duration>,
-) {
-    let backoff = compute_backoff(retry, attempt, retry_after);
-    tokio::time::sleep(backoff).await;
-}
-
-#[cfg(not(feature = "retry"))]
-async fn sleep_before_retry(
-    _retry: crate::config::RetryConfig,
-    _attempt: u32,
-    _retry_after: Option<Duration>,
-) {
-}
-
-/// Computes the backoff before the next attempt: `Retry-After` takes precedence
-/// (clamped to `max_backoff`); otherwise exponential backoff with full jitter,
-/// capped at `max_backoff`.
-#[cfg(feature = "retry")]
-fn compute_backoff(
-    retry: crate::config::RetryConfig,
-    attempt: u32,
-    retry_after: Option<Duration>,
-) -> Duration {
-    if let Some(retry_after) = retry_after {
-        return retry_after.min(retry.max_backoff);
-    }
-    let exponent = attempt.saturating_sub(1).min(20); // bound the shift to avoid overflow
-    let ceiling = retry
-        .initial_backoff
-        .saturating_mul(1u32.checked_shl(exponent).unwrap_or(u32::MAX))
-        .min(retry.max_backoff);
-    full_jitter(ceiling)
-}
-
-/// Full-jitter backoff: a uniformly random duration in `0..=ceiling`.
-#[cfg(feature = "retry")]
-fn full_jitter(ceiling: Duration) -> Duration {
-    if ceiling.is_zero() {
-        return ceiling;
-    }
-    // A dependency-free, non-cryptographic jitter source is sufficient here: backoff
-    // timing has no security property, only a fairness one (avoiding a thundering
-    // herd), and pulling in `rand` for it would cost more than it is worth.
-    let nanos = Instant::now().elapsed().as_nanos() ^ u128::from(std::process::id());
-    #[allow(clippy::cast_precision_loss)]
-    let fraction = (nanos % 1_000_000) as f64 / 1_000_000.0;
-    Duration::from_secs_f64(ceiling.as_secs_f64() * fraction)
-}
-
-/// Extracts the `retry_after_secs` carried by [`Error::RateLimited`], if any.
-fn retry_after_from_error(err: &Error) -> Option<Duration> {
-    match err {
-        Error::RateLimited {
-            retry_after_secs: Some(secs),
-        } => Some(Duration::from_secs(*secs)),
-        _ => None,
-    }
-}
-
-/// Parses a `Retry-After` header, in either the seconds form or the HTTP-date form.
-fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    if let Ok(secs) = raw.trim().parse::<u64>() {
-        return Some(secs);
-    }
-    parse_http_date_seconds_from_now(raw.trim())
-}
-
-/// Parses an RFC 7231 IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) and returns the
-/// number of seconds from now until that instant, saturating at zero if it is past.
-fn parse_http_date_seconds_from_now(s: &str) -> Option<u64> {
-    let epoch_secs = parse_imf_fixdate(s)?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    let now_i64 = now.cast_signed();
-    Some(epoch_secs.saturating_sub(now_i64).max(0).cast_unsigned())
-}
-
-/// Parses `"Sun, 06 Nov 1994 08:49:37 GMT"` into Unix seconds. Returns `None` for any
-/// other format; this SDK does not need to accept the obsolete RFC 850 / ANSI C forms.
-fn parse_imf_fixdate(s: &str) -> Option<i64> {
-    // "Sun, 06 Nov 1994 08:49:37 GMT"
-    let s = s.strip_suffix(" GMT")?;
-    let (_weekday, rest) = s.split_once(", ")?;
-    let mut parts = rest.split(' ');
-    let day: i64 = parts.next()?.parse().ok()?;
-    let month = month_from_abbrev(parts.next()?)?;
-    let year: i64 = parts.next()?.parse().ok()?;
-    let time = parts.next()?;
-    let mut time_parts = time.split(':');
-    let hour: i64 = time_parts.next()?.parse().ok()?;
-    let minute: i64 = time_parts.next()?.parse().ok()?;
-    let second: i64 = time_parts.next()?.parse().ok()?;
-
-    let days = days_from_civil(year, month, day);
-    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
-}
-
-/// Maps a three-letter month abbreviation to `1..=12`.
-fn month_from_abbrev(s: &str) -> Option<i64> {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    #[allow(clippy::cast_possible_wrap)] // MONTHS.len() == 12; the position always fits in i64
-    MONTHS.iter().position(|m| *m == s).map(|i| i as i64 + 1)
-}
-
-/// Days since the Unix epoch for a civil (Gregorian) date, via Howard Hinnant's
-/// `days_from_civil` algorithm. Valid for all proleptic Gregorian dates.
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-/// Reads a response body up to [`MAX_RESPONSE_BODY_BYTES`], erroring instead of
-/// exhausting memory on an oversized or malformed gateway response.
-async fn read_capped_body(mut response: reqwest::Response) -> Result<Vec<u8>, Error> {
-    let mut buf = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        if buf.len() + chunk.len() > MAX_RESPONSE_BODY_BYTES {
-            return Err(Error::Parse(format!(
-                "response body exceeds {MAX_RESPONSE_BODY_BYTES} byte cap"
-            )));
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    Ok(buf)
-}
-
-/// Clears fields the System One surface does not define, logging the drop.
-fn drop_unsupported_fields<'a>(
-    surface: Surface,
-    session_id: Option<&'a str>,
-    user: Option<&'a str>,
-    trace: Option<&'a TraceConfig>,
-) -> (Option<&'a str>, Option<&'a str>, Option<&'a TraceConfig>) {
-    if surface == Surface::SystemOne {
-        if session_id.is_some() || user.is_some() || trace.is_some() {
-            debug!(
-                dropped_session_id = session_id.is_some(),
-                dropped_user = user.is_some(),
-                dropped_trace = trace.is_some(),
-                "System One surface does not support session_id/user/trace; dropping"
-            );
-        }
-        (None, None, None)
-    } else {
-        (session_id, user, trace)
-    }
-}
-
-/// Fires a `warn!` when any returned `choice`/`score` confidence is below `0.5`, so
-/// miscalibrated gates surface in dashboards without extra application code.
-fn warn_on_low_confidence(answers: &Answers) {
-    const LOW_CONFIDENCE: f64 = 0.5;
-    for (key, answer) in answers {
-        let confidence = match answer {
-            crate::answer::Answer::Choice(c) => c.confidence,
-            crate::answer::Answer::Score(s) => s.confidence,
-            crate::answer::Answer::Noul(_) | crate::answer::Answer::Other { .. } => None,
-        };
-        if let Some(confidence) = confidence
-            && confidence < LOW_CONFIDENCE
-        {
-            warn!(question = key, confidence, "low-confidence answer");
-        }
-    }
-}
-
-/// Whether `url` points at a loopback address, the only case `with_api_base` accepts
-/// a non-`https` scheme for (local mocks such as `wiremock`).
-fn is_local_http_opt_in(url: &url::Url) -> bool {
-    matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
-}
-
-/// Infallible fallback for the default API base URL, used only if the literal
-/// constant ever failed to parse (which `cargo test` guards against).
-fn unreachable_url() -> url::Url {
-    // Safety net, not a real fallible path: the provider bases are literal constants
-    // covered by `test_should_parse_default_api_base`.
-    url::Url::parse("https://openrouter.ai").unwrap_or_else(|_| {
-        // `data:` URLs always parse; this line is unreachable in practice.
-        url::Url::parse("data:,").expect("`data:,` is always a valid URL")
-    })
 }
 
 #[cfg(test)]
 mod tests {
-    use rstest::rstest;
-    use secrecy::SecretString;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
-
     use super::*;
-    use crate::CaseSet;
-
-    #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
-    #[test]
-    fn test_should_create_provider_clients_directly_with_keys() {
-        let default = Client::new("key").unwrap();
-        assert_eq!(default.provider(), Provider::OpenRouter);
-        let openrouter = Client::openrouter(String::from("key")).unwrap();
-        assert_eq!(
-            openrouter.request_url().as_str(),
-            "https://openrouter.ai/api/alpha/decisions"
-        );
-        let typesafe = Client::typesafe(SecretString::from("typesafe-super-secret")).unwrap();
-        assert_eq!(
-            typesafe.request_url().as_str(),
-            "https://api.typesafe.ai/v1/systemone"
-        );
-        assert!(!format!("{typesafe:?}").contains("typesafe-super-secret"));
-        assert!(format!("{typesafe:?}").contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn test_should_apply_provider_from_yaml_config() {
-        let config: Config = serde_norway::from_str("provider: typesafe\n").unwrap();
-        let client = Client::from_config(reqwest::Client::new(), "key", config).unwrap();
-        assert_eq!(client.provider(), Provider::TypeSafe);
-        assert_eq!(client.surface(), Surface::SystemOne);
-        assert_eq!(
-            client.request_url().as_str(),
-            "https://api.typesafe.ai/v1/systemone"
-        );
-    }
-
-    #[test]
-    fn test_should_preserve_custom_base_and_isolate_cloned_provider_settings() {
-        let openrouter = Client::with_http(reqwest::Client::new(), "key")
-            .with_api_base("http://127.0.0.1:8099")
-            .unwrap();
-        let typesafe = openrouter.clone().with_provider(Provider::TypeSafe);
-        assert_eq!(openrouter.request_url().path(), "/api/alpha/decisions");
-        assert_eq!(
-            typesafe.request_url().as_str(),
-            "http://127.0.0.1:8099/v1/systemone"
-        );
-    }
-
-    #[rstest]
-    #[case(vec![("JEV_API_KEY", "generic")], Provider::OpenRouter, "generic")]
-    #[case(vec![("OPENROUTER_API_KEY", "router")], Provider::OpenRouter, "router")]
-    #[case(vec![("TYPESAFE_API_KEY", "direct")], Provider::TypeSafe, "direct")]
-    #[case(vec![("OPENROUTER_API_KEY", "router"), ("TYPESAFE_API_KEY", "direct")], Provider::OpenRouter, "router")]
-    #[case(vec![("JEV_API_KEY", "generic"), ("OPENROUTER_API_KEY", "router"), ("TYPESAFE_API_KEY", "direct")], Provider::OpenRouter, "generic")]
-    #[case(vec![("JEV_PROVIDER", "typesafe"), ("TYPESAFE_API_KEY", "direct"), ("OPENROUTER_API_KEY", "router")], Provider::TypeSafe, "direct")]
-    #[case(vec![("JEV_PROVIDER", "typesafe"), ("JEV_API_KEY", "generic"), ("TYPESAFE_API_KEY", "direct")], Provider::TypeSafe, "generic")]
-    #[case(vec![("JEV_PROVIDER", "openrouter"), ("JEV_API_KEY", "generic"), ("OPENROUTER_API_KEY", "router")], Provider::OpenRouter, "generic")]
-    fn test_should_resolve_matching_environment_credentials(
-        #[case] variables: Vec<(&str, &str)>,
-        #[case] expected_provider: Provider,
-        #[case] expected_key: &str,
-    ) {
-        let (provider, key) = credentials_from_env(|name| {
-            variables
+    fn environment(entries: &[(&str, &str)]) -> Result<Client, Error> {
+        Client::from_environment(|name| {
+            Ok(entries
                 .iter()
-                .find(|(variable, _)| *variable == name)
-                .map(|(_, value)| (*value).to_string())
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned()))
         })
-        .unwrap();
-        assert_eq!(provider, expected_provider);
-        assert_eq!(key.expose_secret(), expected_key);
     }
-
-    #[rstest]
-    #[case(vec![])]
-    #[case(vec![("JEV_PROVIDER", "typesafe"), ("OPENROUTER_API_KEY", "router")])]
-    #[case(vec![("JEV_PROVIDER", "openrouter"), ("TYPESAFE_API_KEY", "direct")])]
-    fn test_should_reject_missing_or_wrong_provider_environment_key(
-        #[case] variables: Vec<(&str, &str)>,
-    ) {
-        let result = credentials_from_env(|name| {
-            variables
-                .iter()
-                .find(|(variable, _)| *variable == name)
-                .map(|(_, value)| (*value).to_string())
-        });
-        assert!(matches!(result, Err(Error::MissingApiKey)));
-    }
-
     #[test]
-    fn test_should_reject_unknown_environment_provider() {
-        let result = credentials_from_env(|name| match name {
-            "JEV_PROVIDER" => Some("unknown".to_string()),
-            "JEV_API_KEY" => Some("key".to_string()),
-            _ => None,
-        });
-        assert!(matches!(result, Err(Error::Invalid { field, .. }) if field == "provider"));
+    fn test_should_reject_ambiguous_credentials() {
+        assert!(matches!(
+            environment(&[("OPENAI_API_KEY", "a"), ("OPENROUTER_API_KEY", "b")]),
+            Err(Error::AmbiguousProvider)
+        ));
+        assert!(matches!(
+            environment(&[("JEV_API_KEY", "a")]),
+            Err(Error::AmbiguousProvider)
+        ));
     }
-
-    #[rstest]
-    #[case(String::new())]
-    #[case(" ".to_string())]
-    #[case("key\r\nInjected: value".to_string())]
-    #[case("含中文的key".to_string())]
-    #[case("x".repeat(MAX_API_KEY_BYTES + 1))]
-    fn test_should_reject_invalid_keys_without_exposing_them(#[case] key: String) {
-        let result = Client::from_config(reqwest::Client::new(), key, Config::default());
-        assert!(matches!(result, Err(Error::Invalid { ref field, .. }) if field == "api_key"));
-        let error = result.unwrap_err();
+    #[test]
+    fn test_should_use_only_selected_provider_credentials() {
+        assert!(matches!(
+            environment(&[("JEV_PROVIDER", "openai"), ("OPENROUTER_API_KEY", "b")]),
+            Err(Error::MissingCredentials)
+        ));
+        assert!(matches!(
+            environment(&[
+                ("JEV_PROVIDER", "openai"),
+                ("JEV_API_KEY", " "),
+                ("OPENAI_API_KEY", "b")
+            ]),
+            Err(Error::InvalidConfiguration(_))
+        ));
         assert_eq!(
-            error.to_string(),
-            "invalid api_key: must contain 1..=4096 printable ASCII bytes without whitespace"
+            environment(&[("OPENAI_API_KEY", "a")]).unwrap().provider(),
+            Some(Provider::OpenAi)
         );
-    }
-
-    #[test]
-    fn test_should_accept_key_at_maximum_byte_length() {
-        assert!(validate_api_key(&SecretString::from("x".repeat(MAX_API_KEY_BYTES))).is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_should_run_case_and_tag_result_with_case_id() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/alpha/decisions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "model": "typesafe/jev-1.13",
-                "usage": {"input_tokens": 1, "output_tokens": 1},
-                "answers": {"refund": {"type": "noul", "noul": 0.9}}
-            })))
-            .mount(&server)
-            .await;
-
-        let client = Client::with_http(reqwest::Client::new(), SecretString::from("key"))
-            .with_api_base(&server.uri())
-            .unwrap();
-
-        let cases = CaseSet::from_json_str(
-            r#"{"cases": [{
-                "id": "ticket-001",
-                "state": "a refund ticket",
-                "questions": {
-                    "refund": {"type": "noul", "instructions": "Refund?"}
-                }
-            }]}"#,
-        )
-        .unwrap();
-        let case = cases.iter().next().unwrap();
-
-        let result = client.run_case(case).await.unwrap();
-        assert_eq!(result.id, "ticket-001");
-        assert_eq!(result.response.answers.noul("refund").unwrap(), 0.9);
-    }
-
-    #[test]
-    fn test_should_redact_api_key_in_debug_output() {
-        let client = Client::with_http(
-            reqwest::Client::new(),
-            SecretString::from("sk-super-secret"),
-        );
-        let debug = format!("{client:?}");
-        assert!(!debug.contains("sk-super-secret"));
-        assert!(debug.contains("REDACTED"));
-    }
-
-    #[test]
-    fn test_should_report_no_api_key_in_debug_output_for_without_api_key() {
-        let client = Client::without_api_key("http://127.0.0.1:8099").unwrap();
-        let debug = format!("{client:?}");
-        assert!(debug.contains("none"));
-        assert!(!debug.contains("REDACTED"));
-    }
-
-    #[test]
-    fn test_should_return_invalid_when_no_tls_feature_and_new_called() {
-        #[cfg(not(any(feature = "rustls-tls", feature = "native-tls")))]
-        {
-            let result = Client::new(SecretString::from("key"));
-            assert!(matches!(result, Err(Error::Invalid { .. })));
-        }
-    }
-
-    #[test]
-    fn test_should_parse_default_api_base() {
-        for provider in [Provider::OpenRouter, Provider::TypeSafe] {
-            assert!(url::Url::parse(provider.api_base()).is_ok());
-        }
-    }
-
-    #[test]
-    fn test_should_reject_non_https_api_base() {
-        let client = Client::with_http(reqwest::Client::new(), SecretString::from("key"));
-        assert!(client.with_api_base("http://example.com").is_err());
-    }
-
-    #[test]
-    fn test_should_accept_loopback_http_api_base_for_local_mocks() {
-        let client = Client::with_http(reqwest::Client::new(), SecretString::from("key"));
-        assert!(client.with_api_base("http://127.0.0.1:8080").is_ok());
-        let client = Client::with_http(reqwest::Client::new(), SecretString::from("key"));
-        assert!(client.with_api_base("http://localhost:8080").is_ok());
-    }
-
-    #[test]
-    fn test_should_build_request_url_per_surface() {
-        let client = Client::with_http(reqwest::Client::new(), SecretString::from("key"))
-            .with_api_base("http://127.0.0.1:9999")
-            .unwrap();
-        assert_eq!(client.request_url().path(), "/api/alpha/decisions");
-        let client = client.with_surface(Surface::SystemOne);
-        assert_eq!(client.request_url().path(), "/api/v1/systemone");
-    }
-
-    #[test]
-    fn test_should_parse_retry_after_seconds() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
-        assert_eq!(parse_retry_after(&headers), Some(120));
-    }
-
-    #[test]
-    fn test_should_parse_retry_after_http_date() {
-        // Fixed historical date: the wait time will be zero (it is in the past), but
-        // parsing itself must succeed rather than falling through to `None`.
-        let epoch = parse_imf_fixdate("Sun, 06 Nov 1994 08:49:37 GMT").unwrap();
-        assert_eq!(epoch, 784_111_777);
-    }
-
-    #[test]
-    fn test_should_return_none_for_unparsable_retry_after() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::RETRY_AFTER, "not-a-date".parse().unwrap());
-        assert_eq!(parse_retry_after(&headers), None);
-    }
-
-    #[test]
-    fn test_should_drop_decisions_only_fields_on_system_one() {
-        let trace = TraceConfig::new(serde_json::json!({}));
-        let (session, user, trace) =
-            drop_unsupported_fields(Surface::SystemOne, Some("s"), Some("u"), Some(&trace));
-        assert_eq!(session, None);
-        assert_eq!(user, None);
-        assert_eq!(trace, None);
-    }
-
-    #[test]
-    fn test_should_keep_decisions_only_fields_on_decisions_surface() {
-        let trace = TraceConfig::new(serde_json::json!({}));
-        let (session, user, trace) =
-            drop_unsupported_fields(Surface::Decisions, Some("s"), Some("u"), Some(&trace));
-        assert_eq!(session, Some("s"));
-        assert_eq!(user, Some("u"));
-        assert!(trace.is_some());
-    }
-
-    #[test]
-    #[cfg(feature = "retry")]
-    fn test_should_compute_backoff_from_retry_after_clamped_to_max() {
-        let retry =
-            crate::config::RetryConfig::default().with_max_backoff(Duration::from_millis(500));
-        let backoff = compute_backoff(retry, 1, Some(Duration::from_secs(10)));
-        assert_eq!(backoff, Duration::from_millis(500));
-    }
-
-    #[test]
-    #[cfg(feature = "retry")]
-    fn test_should_compute_backoff_within_exponential_ceiling() {
-        let retry = crate::config::RetryConfig::default()
-            .with_initial_backoff(Duration::from_millis(100))
-            .with_max_backoff(Duration::from_secs(10));
-        for attempt in 1..=5 {
-            let backoff = compute_backoff(retry, attempt, None);
-            let ceiling = retry.initial_backoff * 2u32.pow(attempt - 1);
-            assert!(backoff <= ceiling.min(retry.max_backoff));
-        }
-    }
-
-    #[test]
-    #[cfg(feature = "retry")]
-    fn test_should_cap_backoff_at_max_backoff_for_large_attempt_numbers() {
-        let retry = crate::config::RetryConfig::default()
-            .with_initial_backoff(Duration::from_millis(100))
-            .with_max_backoff(Duration::from_secs(2));
-        let backoff = compute_backoff(retry, 50, None);
-        assert!(backoff <= Duration::from_secs(2));
-    }
-
-    #[test]
-    fn test_should_force_single_attempt_without_retry_feature() {
-        #[cfg(not(feature = "retry"))]
-        assert_eq!(effective_max_attempts(5), 1);
-        #[cfg(feature = "retry")]
-        assert_eq!(effective_max_attempts(5), 5);
-    }
-
-    #[test]
-    fn test_should_never_return_zero_max_attempts() {
-        assert!(effective_max_attempts(0) >= 1);
     }
 }

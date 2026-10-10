@@ -64,9 +64,8 @@ fn variant_key_override(attrs: &[syn::Attribute]) -> syn::Result<Option<String>>
 /// Applies a `rename_all` casing rule to a `PascalCase` variant identifier.
 ///
 /// Only the three values the derive documents are accepted: `snake_case` (the
-/// default), `kebab-case`, and `lowercase`. `choice` option keys must already match
-/// `^[a-z0-9_-]{1,64}$`, so a camelCase/PascalCase/SCREAMING rule would only ever
-/// produce an invalid key.
+/// default), `kebab-case`, and `lowercase`. Explicit key overrides can use the
+/// full ASCII allowlist `^[a-zA-Z0-9_-]{1,64}$`.
 fn apply_rename_all(name: &str, rule: &str) -> Result<String, String> {
     match rule {
         "snake_case" => Ok(name.to_snake_case()),
@@ -80,7 +79,7 @@ fn apply_rename_all(name: &str, rule: &str) -> Result<String, String> {
 }
 
 /// Validates a wire key against the same allowlist `jev::question` enforces at
-/// runtime for `choice` option keys: `^[a-z0-9_-]{1,64}$`.
+/// runtime for `choice` option keys: `^[a-zA-Z0-9_-]{1,64}$`.
 pub(crate) fn validate_choice_key(key: &str) -> Result<(), String> {
     if key.is_empty() || key.len() > MAX_KEY_BYTES {
         return Err(format!(
@@ -90,10 +89,10 @@ pub(crate) fn validate_choice_key(key: &str) -> Result<(), String> {
     }
     let valid = key
         .bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
     if !valid {
         return Err(format!(
-            "key `{key}` must match `^[a-z0-9_-]{{1,{MAX_KEY_BYTES}}}$`"
+            "key `{key}` must match `^[a-zA-Z0-9_-]{{1,{MAX_KEY_BYTES}}}$`"
         ));
     }
     Ok(())
@@ -104,6 +103,12 @@ pub(crate) fn validate_choice_key(key: &str) -> Result<(), String> {
 pub(crate) fn validate_guidance_text(field: &str, text: &str) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err(format!("{field} must not be empty (missing doc comment?)"));
+    }
+    if text
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return Err(format!("{field} contains abnormal control characters"));
     }
     if text.len() > MAX_GUIDANCE_BYTES {
         return Err(format!(
@@ -119,8 +124,7 @@ pub(crate) fn validate_guidance_text(field: &str, text: &str) -> Result<(), Stri
 /// with five missing doc comments sees five errors, not one).
 ///
 /// `key_kind` names what a key is called in error messages (`"option"` for
-/// `ChoiceOptions`, `"level"` for `ScoreLevels`); `needs_key` controls whether a
-/// wire key is computed at all (`ScoreLevels` has no keys, only ordered text).
+/// `ChoiceOptions`, `"level"` for `ScoreLevels`). Both have stable keys.
 /// `(min, max)` bounds the variant count, mirroring `jev::question`'s runtime
 /// bounds for the corresponding primitive.
 ///
@@ -133,7 +137,6 @@ pub(crate) fn validate_guidance_text(field: &str, text: &str) -> Result<(), Stri
 pub(crate) fn resolve_variants(
     input: &DeriveInput,
     key_kind: &str,
-    needs_key: bool,
     (min, max): (usize, usize),
 ) -> syn::Result<Vec<ResolvedVariant>> {
     let enum_attrs = <EnumAttrs as FromDeriveInput>::from_derive_input(input).map_err(|e| {
@@ -148,7 +151,7 @@ pub(crate) fn resolve_variants(
         ));
     };
 
-    if data_enum.variants.len() < 2 {
+    if data_enum.variants.len() < min {
         return Err(syn::Error::new_spanned(
             &input.ident,
             format!(
@@ -168,7 +171,6 @@ pub(crate) fn resolve_variants(
             ),
         ));
     }
-    let _ = min; // `min` is always 2 today; kept as a parameter for forward compatibility.
 
     let mut errors: Vec<syn::Error> = Vec::new();
     let mut resolved = Vec::with_capacity(data_enum.variants.len());
@@ -201,7 +203,7 @@ pub(crate) fn resolve_variants(
             continue;
         }
 
-        let key = if needs_key {
+        let key = {
             let override_key = match variant_key_override(&variant.attrs) {
                 Ok(k) => k,
                 Err(e) => {
@@ -239,8 +241,6 @@ pub(crate) fn resolve_variants(
                 continue;
             }
             key
-        } else {
-            String::new()
         };
 
         resolved.push(ResolvedVariant {
@@ -263,12 +263,8 @@ pub(crate) fn resolve_variants(
 /// Generates `impl ChoiceOptions for #ident` from a fieldless enum whose variants'
 /// doc comments are the option criteria.
 pub(crate) fn expand_choice_options(input: &DeriveInput) -> proc_macro2::TokenStream {
-    let variants = match resolve_variants(
-        input,
-        "option",
-        true,
-        (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS),
-    ) {
+    let variants = match resolve_variants(input, "option", (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS))
+    {
         Ok(v) => v,
         Err(e) => return e.to_compile_error(),
     };
@@ -314,15 +310,15 @@ pub(crate) fn expand_choice_options(input: &DeriveInput) -> proc_macro2::TokenSt
 /// Generates `impl ScoreLevels for #ident` from a fieldless enum whose variants'
 /// doc comments are the level criteria, lowest first in declaration order.
 pub(crate) fn expand_score_levels(input: &DeriveInput) -> proc_macro2::TokenStream {
-    let variants =
-        match resolve_variants(input, "level", false, (MIN_SCORE_LEVELS, MAX_SCORE_LEVELS)) {
-            Ok(v) => v,
-            Err(e) => return e.to_compile_error(),
-        };
+    let variants = match resolve_variants(input, "level", (MIN_SCORE_LEVELS, MAX_SCORE_LEVELS)) {
+        Ok(v) => v,
+        Err(e) => return e.to_compile_error(),
+    };
 
     let ident = &input.ident;
     let texts: Vec<&str> = variants.iter().map(|v| v.text.as_str()).collect();
 
+    let keys: Vec<&str> = variants.iter().map(|v| v.key.as_str()).collect();
     let from_index_arms = variants.iter().enumerate().map(|(i, v)| {
         let variant_ident = &v.ident;
         quote::quote! { #i => ::std::option::Option::Some(#ident::#variant_ident), }
@@ -335,8 +331,9 @@ pub(crate) fn expand_score_levels(input: &DeriveInput) -> proc_macro2::TokenStre
 
     quote::quote! {
         impl ::jev::ScoreLevels for #ident {
-            fn levels() -> &'static [&'static str] {
-                &[#( #texts ),*]
+            fn levels() -> &'static [::jev::LevelSpec] {
+                const LEVELS: &[::jev::LevelSpec] = &[#( ::jev::LevelSpec::new(#keys, #texts) ),*];
+                LEVELS
             }
 
             fn from_index(index: usize) -> ::std::option::Option<Self> {
@@ -391,7 +388,7 @@ mod tests {
     #[test]
     fn test_should_validate_choice_key_charset() {
         assert!(validate_choice_key("front-end_1").is_ok());
-        assert!(validate_choice_key("FrontEnd").is_err());
+        assert!(validate_choice_key("FrontEnd").is_ok());
         assert!(validate_choice_key("").is_err());
         assert!(validate_choice_key(&"x".repeat(MAX_KEY_BYTES + 1)).is_err());
     }
@@ -413,13 +410,8 @@ mod tests {
                 FrontEnd,
             }
         };
-        let resolved = resolve_variants(
-            &input,
-            "option",
-            true,
-            (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS),
-        )
-        .unwrap();
+        let resolved =
+            resolve_variants(&input, "option", (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS)).unwrap();
         assert_eq!(resolved.len(), 2);
         assert_eq!(resolved[0].key, "payments");
         assert_eq!(resolved[1].key, "front_end");
@@ -427,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_resolve_variants_without_keys_for_score_levels() {
+    fn test_should_resolve_stable_keys_for_score_levels() {
         let input: DeriveInput = syn::parse_quote! {
             enum Urgency {
                 /// Low.
@@ -437,8 +429,8 @@ mod tests {
             }
         };
         let resolved =
-            resolve_variants(&input, "level", false, (MIN_SCORE_LEVELS, MAX_SCORE_LEVELS)).unwrap();
-        assert_eq!(resolved[0].key, "");
+            resolve_variants(&input, "level", (MIN_SCORE_LEVELS, MAX_SCORE_LEVELS)).unwrap();
+        assert_eq!(resolved[0].key, "low");
         assert_eq!(resolved[0].text, "Low.");
     }
 
@@ -451,13 +443,7 @@ mod tests {
             }
         };
         assert!(
-            resolve_variants(
-                &input,
-                "option",
-                true,
-                (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS)
-            )
-            .is_err()
+            resolve_variants(&input, "option", (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS)).is_err()
         );
     }
 
@@ -472,13 +458,7 @@ mod tests {
             }
         };
         assert!(
-            resolve_variants(
-                &input,
-                "option",
-                true,
-                (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS)
-            )
-            .is_err()
+            resolve_variants(&input, "option", (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS)).is_err()
         );
     }
 
@@ -492,13 +472,7 @@ mod tests {
             }
         };
         assert!(
-            resolve_variants(
-                &input,
-                "option",
-                true,
-                (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS)
-            )
-            .is_err()
+            resolve_variants(&input, "option", (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS)).is_err()
         );
     }
 
@@ -515,13 +489,7 @@ mod tests {
             }
         };
         assert!(
-            resolve_variants(
-                &input,
-                "option",
-                true,
-                (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS)
-            )
-            .is_err()
+            resolve_variants(&input, "option", (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS)).is_err()
         );
     }
 
@@ -536,13 +504,8 @@ mod tests {
                 Frontend,
             }
         };
-        let resolved = resolve_variants(
-            &input,
-            "option",
-            true,
-            (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS),
-        )
-        .unwrap();
+        let resolved =
+            resolve_variants(&input, "option", (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS)).unwrap();
         assert_eq!(resolved[0].key, "pay");
     }
 
@@ -552,13 +515,7 @@ mod tests {
             struct NotAnEnum;
         };
         assert!(
-            resolve_variants(
-                &input,
-                "option",
-                true,
-                (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS)
-            )
-            .is_err()
+            resolve_variants(&input, "option", (MIN_CHOICE_OPTIONS, MAX_CHOICE_OPTIONS)).is_err()
         );
     }
 }

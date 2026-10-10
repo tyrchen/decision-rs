@@ -1,15 +1,20 @@
 # jev-macros
 
-Proc-macros for the [`jev`](../jev) SDK: `#[derive(Decision, ChoiceOptions, ScoreLevels)]`.
+Derives for `jev-typed` 0.3, re-exported through its default `derive` feature.
+Depend on `jev-typed` with library name `jev`; generated code uses `::jev`.
 
-This is an implementation detail re-exported through `jev`'s `derive` feature
-(default on). Add `jev-typed = "0.2"` to your dependencies and import `jev` in Rust;
-the derives are exported from `jev::{Decision, ChoiceOptions, ScoreLevels}`.
+`Decision` accepts concrete named structs with 1–64 `Predicate`, `Choice<T>`,
+`Score<T>` or `Outcome<T>` fields. Field documentation supplies instructions;
+`#[jev(instructions = "...")]` overrides them. `#[jev(key = "...")]` overrides the
+question key. Predicate criteria must specify both `yes` and `no`.
 
-See the [workspace README](../../README.md) for what the derives do; the short
-version: `///` doc comments on struct fields and enum variants become the
-`instructions` and criteria sent to the model, checked at compile time.
+`ChoiceOptions` and `ScoreLevels` accept fieldless enums with documented variants.
+Stable keys default to snake_case and support per-variant `#[jev(key = "...")]`
+and enum-level `rename_all = "snake_case" | "kebab-case" | "lowercase"`.
+Score declaration order defines the scale; each level preserves its key and description.
 
-## License
-
-MIT — see [LICENSE](../../LICENSE.md).
+The derives reject duplicate keys, invalid guidance, excessive counts, unsupported
+fields, nested Outcome and Option fields. Generated schemas use the same checked
+builder as runtime schemas and cache `Result`, so malformed handwritten option
+traits produce an error without panicking. Typed decoding collects required refusals
+and retains explicit `Outcome::Refused` values.

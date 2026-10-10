@@ -1,0 +1,5 @@
+error: `Decision` requires 1..=64 fields (one question per field)
+ --> tests/derive-fail/too_many_questions.rs:3:8
+  |
+3 | struct Bad {
+  |        ^^^

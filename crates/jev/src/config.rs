@@ -1,420 +1,255 @@
-//! `Config`, `Surface`, `RetryConfig`, and `Thresholds`.
+//! Validated, secret-free runtime configuration.
 
-use std::{collections::HashMap, str::FromStr, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
-use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use serde::{Deserialize, Serialize};
 
-use crate::{
-    error::Error,
-    model::{DEFAULT_MODEL, Model},
-    provider::Provider,
-};
+use crate::{Error, Model, Probability, Provider, question::validate_key};
 
-/// Default per-request timeout.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Default maximum retry attempts, including the first.
-pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
-/// Default initial backoff before the first retry.
-pub const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
-/// Default backoff cap.
-pub const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(2);
-
-/// Which HTTP surface a [`crate::Client`] talks to.
-///
-/// Both surfaces answer the same questions with the same semantics; see the
-/// crate-level docs for the field differences. [`Surface::Decisions`] is the
-/// default because it is the one documented for non-official-SDK clients and
-/// supports `session_id` / `trace` for cross-service observability.
-///
-/// # Examples
-///
-/// ```
-/// use jev::Surface;
-///
-/// assert_eq!(Surface::default(), Surface::Decisions);
-/// assert_eq!(Surface::Decisions.path(), "/api/alpha/decisions");
-/// assert_eq!(Surface::SystemOne.path(), "/api/v1/systemone");
-/// ```
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Surface {
-    /// `POST /api/alpha/decisions`. Alpha. Adds `provider`, `session_id`, `trace`, `user`.
-    #[default]
-    Decisions,
-    /// `POST /api/v1/systemone`. Stable `v1` path. Accepts bare model IDs.
-    SystemOne,
-}
-
-impl Surface {
-    /// The HTTP path this surface is served at.
-    #[must_use]
-    pub fn path(self) -> &'static str {
-        match self {
-            Surface::Decisions => "/api/alpha/decisions",
-            Surface::SystemOne => "/api/v1/systemone",
-        }
-    }
-}
-
-/// Bounded retry configuration honouring `Retry-After`.
-///
-/// The endpoint has no idempotency key, so a retry can double-bill a request that
-/// the server actually processed but whose response was lost to a transport error.
-/// Set `max_attempts: 1` to disable retry entirely when that risk is unacceptable.
-///
-/// # Examples
-///
-/// ```
-/// use jev::RetryConfig;
-/// use std::time::Duration;
-///
-/// let no_retry = RetryConfig::disabled();
-/// assert_eq!(no_retry.max_attempts, 1);
-///
-/// let custom = RetryConfig::default().with_max_attempts(5).with_initial_backoff(Duration::from_millis(50));
-/// assert_eq!(custom.max_attempts, 5);
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+/// Retry policy. Retry-After is honored even beyond the computed backoff cap.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct RetryConfig {
-    /// Maximum number of attempts, including the first. `1` disables retry.
+    /// Maximum attempts including the first (1..=10).
     pub max_attempts: u32,
-    /// Backoff before the first retry.
-    #[serde(with = "duration_millis", rename = "initialBackoffMs")]
-    pub initial_backoff: Duration,
-    /// Backoff cap; `Retry-After` is clamped to this.
-    #[serde(with = "duration_millis", rename = "maxBackoffMs")]
-    pub max_backoff: Duration,
+    /// Initial computed backoff in milliseconds.
+    pub initial_backoff_ms: u64,
+    /// Maximum computed backoff in milliseconds (at most 30000).
+    pub max_backoff_ms: u64,
 }
-
 impl Default for RetryConfig {
     fn default() -> Self {
-        RetryConfig {
-            max_attempts: DEFAULT_MAX_ATTEMPTS,
-            initial_backoff: DEFAULT_INITIAL_BACKOFF,
-            max_backoff: DEFAULT_MAX_BACKOFF,
+        Self {
+            max_attempts: 3,
+            initial_backoff_ms: 200,
+            max_backoff_ms: 2000,
         }
     }
 }
-
 impl RetryConfig {
-    /// A configuration that never retries.
+    /// Disable retries.
+    /// ```
+    /// assert_eq!(jev::RetryConfig::disabled().max_attempts, 1);
+    /// ```
     #[must_use]
     pub fn disabled() -> Self {
-        RetryConfig {
+        Self {
             max_attempts: 1,
             ..Self::default()
         }
     }
-
-    /// Sets the maximum attempt count.
-    #[must_use]
-    pub fn with_max_attempts(mut self, max_attempts: u32) -> Self {
-        self.max_attempts = max_attempts;
-        self
-    }
-
-    /// Sets the initial backoff.
-    #[must_use]
-    pub fn with_initial_backoff(mut self, backoff: Duration) -> Self {
-        self.initial_backoff = backoff;
-        self
-    }
-
-    /// Sets the backoff cap.
-    #[must_use]
-    pub fn with_max_backoff(mut self, backoff: Duration) -> Self {
-        self.max_backoff = backoff;
-        self
-    }
-}
-
-/// `serde` helper for `Duration <-> milliseconds` fields.
-mod duration_millis {
-    use std::time::Duration;
-
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub(super) fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_u64(u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-    }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
-        let ms = u64::deserialize(d)?;
-        Ok(Duration::from_millis(ms))
-    }
-}
-
-/// Named, runtime-tunable probability thresholds.
-///
-/// The SDK never picks a threshold itself; gates like [`crate::Noul::is_yes`] and
-/// [`crate::Choice::confident`] take a threshold as an explicit argument. `Thresholds`
-/// exists so an application can load those numbers from configuration instead of
-/// hard-coding them, and swap them without a redeploy (wrap `Config` in `ArcSwap`;
-/// the SDK imposes no reload mechanism of its own).
-///
-/// Every value is validated to be finite and within `0.0..=1.0` when the map is
-/// built or deserialized.
-///
-/// # Examples
-///
-/// ```
-/// use jev::Thresholds;
-///
-/// let mut thresholds = Thresholds::new();
-/// thresholds.insert("autoRouteConfidence", 0.7).unwrap();
-/// assert_eq!(thresholds.get("autoRouteConfidence"), Some(0.7));
-/// assert!(thresholds.require("missing").is_err());
-/// ```
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-#[serde(transparent)]
-pub struct Thresholds(HashMap<String, f64>);
-
-impl Thresholds {
-    /// An empty threshold set.
-    #[must_use]
-    pub fn new() -> Self {
-        Thresholds(HashMap::new())
-    }
-
-    /// Inserts or replaces a named threshold.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Invalid`] if `value` is not finite or not within `0.0..=1.0`.
-    pub fn insert(&mut self, name: impl Into<String>, value: f64) -> Result<(), Error> {
-        validate_threshold(value)?;
-        self.0.insert(name.into(), value);
+    fn validate(self) -> Result<(), Error> {
+        if !(1..=10).contains(&self.max_attempts)
+            || self.initial_backoff_ms == 0
+            || self.initial_backoff_ms > self.max_backoff_ms
+            || self.max_backoff_ms > 30_000
+        {
+            return Err(Error::InvalidConfiguration("retry bounds"));
+        }
         Ok(())
     }
-
-    /// Reads a named threshold, if present.
+}
+/// Byte limits can only be lowered from these hard ceilings.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Limits {
+    /// Evidence bytes, at most 1 MiB.
+    pub input_bytes: usize,
+    /// Serialized request bytes, at most 2 MiB.
+    pub request_bytes: usize,
+    /// Streamed response bytes, at most 4 MiB.
+    pub response_bytes: usize,
+}
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            input_bytes: 1 << 20,
+            request_bytes: 2 << 20,
+            response_bytes: 4 << 20,
+        }
+    }
+}
+impl Limits {
+    fn validate(self) -> Result<(), Error> {
+        let hard = Self::default();
+        if self.input_bytes == 0
+            || self.input_bytes > hard.input_bytes
+            || self.request_bytes == 0
+            || self.request_bytes > hard.request_bytes
+            || self.response_bytes == 0
+            || self.response_bytes > hard.response_bytes
+        {
+            return Err(Error::InvalidConfiguration("byte limits"));
+        }
+        Ok(())
+    }
+}
+/// Validated named probability thresholds.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct Thresholds(BTreeMap<String, Probability>);
+impl Thresholds {
+    /// Create an empty threshold collection.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let gates = jev::Thresholds::new();
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
-    pub fn get(&self, name: &str) -> Option<f64> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Insert a validated probability. Names follow question key rules; at most 64 names.
+    /// # Errors
+    /// Returns an invalid configuration error for an invalid name or count.
+    /// ```
+    /// let mut gates = jev::Thresholds::new();
+    /// gates.insert("route", jev::Probability::try_from(0.8)? )?;
+    /// # Ok::<(), jev::Error>(())
+    /// ```
+    pub fn insert(&mut self, name: &str, probability: Probability) -> Result<(), Error> {
+        validate_key(name).map_err(|_| Error::InvalidConfiguration("threshold name"))?;
+        if !self.0.contains_key(name) && self.0.len() >= 64 {
+            return Err(Error::InvalidConfiguration("threshold count"));
+        }
+        self.0.insert(name.to_owned(), probability);
+        Ok(())
+    }
+    /// Look up a named threshold.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let mut gates = jev::Thresholds::new();
+    /// gates.insert("route", jev::Probability::try_from(0.9)?)?;
+    /// let gate = gates.get("route");
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<Probability> {
         self.0.get(name).copied()
     }
-
-    /// Reads a named threshold, or a named [`Error::Invalid`] if absent.
-    ///
+    /// Require a named threshold.
     /// # Errors
+    /// Returns an invalid configuration error if missing.
     ///
-    /// Returns [`Error::Invalid`] when `name` has no configured value.
-    pub fn require(&self, name: &str) -> Result<f64, Error> {
-        self.get(name).ok_or_else(|| Error::Invalid {
-            field: format!("thresholds.{name}"),
-            reason: "no threshold configured for this name".to_string(),
-        })
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let mut gates = jev::Thresholds::new();
+    /// gates.insert("route", jev::Probability::try_from(0.9)?)?;
+    /// let gate = gates.require("route")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn require(&self, name: &str) -> Result<Probability, Error> {
+        self.get(name)
+            .ok_or(Error::InvalidConfiguration("missing threshold"))
     }
 }
-
-/// Validates a threshold is finite and within `0.0..=1.0`.
-fn validate_threshold(value: f64) -> Result<(), Error> {
-    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-        return Err(Error::Invalid {
-            field: "threshold".to_string(),
-            reason: format!("must be finite and within 0.0..=1.0, got {value}"),
-        });
-    }
-    Ok(())
-}
-
 impl<'de> Deserialize<'de> for Thresholds {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let map = HashMap::<String, f64>::deserialize(deserializer)?;
-        let mut thresholds = Thresholds::new();
-        for (name, value) in map {
-            thresholds.insert(name, value).map_err(D::Error::custom)?;
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let entries = BTreeMap::<String, Probability>::deserialize(deserializer)?;
+        let mut thresholds = Self::new();
+        for (name, value) in entries {
+            thresholds
+                .insert(&name, value)
+                .map_err(serde::de::Error::custom)?;
         }
         Ok(thresholds)
     }
 }
-
-/// Deserializable client configuration, for the config-file path.
-///
-/// Nests under an application's YAML with `#[serde(rename_all = "camelCase", deny_unknown_fields)]`
-/// so a typo in a threshold name or config key is rejected at load time instead of
-/// silently ignored:
-///
-/// ```yaml
-/// jev:
-///   model: typesafe/jev-1.13
-///   surface: decisions
-///   timeoutMs: 10000
-///   retry:
-///     maxAttempts: 3
-///     initialBackoffMs: 200
-///     maxBackoffMs: 2000
-///   thresholds:
-///     autoRouteConfidence: 0.7
-///     isBugYes: 0.9
-/// ```
-///
-/// # Examples
-///
-/// ```
-/// let yaml = r#"
-/// model: typesafe/jev-1.13
-/// surface: decisions
-/// timeoutMs: 5000
-/// thresholds:
-///   isBugYes: 0.9
-/// "#;
-/// let config: jev::Config = serde_norway::from_str(yaml).unwrap();
-/// assert_eq!(config.surface, jev::Surface::Decisions);
-/// assert_eq!(config.thresholds.get("isBugYes"), Some(0.9));
-/// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Settings frozen and validated when constructing a client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
-pub struct Config {
-    /// The hosted provider. Defaults to `OpenRouter`; `TypeSafe` always uses System One.
-    pub provider: Provider,
-    /// The model to request. Defaults to [`crate::DEFAULT_MODEL`].
-    #[serde(with = "model_as_string")]
-    pub model: Model,
-    /// The `OpenRouter` HTTP surface to call. `TypeSafe` always uses System One.
-    pub surface: Surface,
-    /// Override for the API base URL (scheme + host), mainly for tests.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_base: Option<url::Url>,
-    /// Per-request timeout.
-    #[serde(with = "duration_millis", rename = "timeoutMs")]
-    pub timeout: Duration,
-    /// Retry policy.
+#[non_exhaustive]
+pub struct Settings {
+    /// Entire network deadline including queueing, reads and backoff (1..=120000 ms).
+    pub timeout_ms: u64,
+    /// Retry configuration.
     pub retry: RetryConfig,
-    /// Named probability thresholds.
+    /// Downward-adjustable byte limits.
+    pub limits: Limits,
+    /// Application-defined acceptance gates.
     pub thresholds: Thresholds,
-    /// Whether to run the cheap pre-flight context-size estimate.
-    pub context_check: bool,
-    /// Default session identifier applied to every request unless overridden by
-    /// `RequestOptions::with_session_id` (Decisions surface only).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_session_id: Option<String>,
-    /// Default user identifier applied to every request unless overridden by
-    /// `RequestOptions::with_user` (Decisions surface only).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_user: Option<String>,
+    /// Shared client/clone concurrency ceiling (1..=128).
+    pub max_inflight: usize,
 }
-
-impl Default for Config {
+impl Default for Settings {
     fn default() -> Self {
-        Config {
-            provider: Provider::default(),
-            model: DEFAULT_MODEL,
-            surface: Surface::default(),
-            api_base: None,
-            timeout: DEFAULT_TIMEOUT,
+        Self {
+            timeout_ms: 10_000,
             retry: RetryConfig::default(),
+            limits: Limits::default(),
             thresholds: Thresholds::default(),
-            context_check: true,
-            default_session_id: None,
-            default_user: None,
+            max_inflight: 64,
         }
     }
 }
-
-/// `serde` helper for `Model <-> String` via [`FromStr`] / [`std::fmt::Display`].
-mod model_as_string {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    use super::{FromStr, Model};
-
-    pub(super) fn serialize<S: Serializer>(m: &Model, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&m.to_string())
+impl Settings {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        if !(1..=120_000).contains(&self.timeout_ms) || !(1..=128).contains(&self.max_inflight) {
+            return Err(Error::InvalidConfiguration(
+                "deadline or concurrency bounds",
+            ));
+        }
+        self.retry.validate()?;
+        self.limits.validate()
     }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Model, D::Error> {
-        let s = String::deserialize(d)?;
-        Model::from_str(&s).map_err(serde::de::Error::custom)
+    pub(crate) fn timeout(&self) -> Duration {
+        Duration::from_millis(self.timeout_ms)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_should_default_config_to_pinned_model_and_decisions_surface() {
-        let config = Config::default();
-        assert_eq!(config.model, DEFAULT_MODEL);
-        assert_eq!(config.provider, Provider::OpenRouter);
-        assert_eq!(config.surface, Surface::Decisions);
-        assert!(config.context_check);
+/// Secret-free configuration; a provider must always be specified.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Config {
+    /// Hosted provider.
+    pub provider: Provider,
+    /// Logical model; Default resolves for the provider.
+    #[serde(default)]
+    pub model: Model,
+    /// Runtime settings, flattened into configuration.
+    #[serde(flatten)]
+    pub settings: Settings,
+}
+impl Config {
+    /// Build default settings for a provider.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let config = jev::Config::new(jev::Provider::OpenAi);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn new(provider: Provider) -> Self {
+        Self {
+            provider,
+            model: Model::Default,
+            settings: Settings::default(),
+        }
     }
-
-    #[test]
-    fn test_should_deserialize_config_from_yaml() {
-        let yaml = r#"
-model: typesafe/jev-1.13
-surface: systemOne
-timeoutMs: 5000
-retry:
-  maxAttempts: 5
-  initialBackoffMs: 100
-  maxBackoffMs: 1000
-thresholds:
-  isBugYes: 0.9
-contextCheck: false
-"#;
-        let config: Config = serde_norway::from_str(yaml).unwrap();
-        assert_eq!(config.model, Model::Jev113);
-        assert_eq!(config.surface, Surface::SystemOne);
-        assert_eq!(config.timeout, Duration::from_millis(5000));
-        assert_eq!(config.retry.max_attempts, 5);
-        assert_eq!(config.thresholds.get("isBugYes"), Some(0.9));
-        assert!(!config.context_check);
-    }
-
-    #[test]
-    fn test_should_reject_unknown_config_field() {
-        let yaml = "model: jev-1.13\nbogusField: 1\n";
-        assert!(serde_norway::from_str::<Config>(yaml).is_err());
-    }
-
-    #[test]
-    fn test_should_reject_out_of_range_threshold_in_config() {
-        let yaml = "thresholds:\n  bad: 1.5\n";
-        assert!(serde_norway::from_str::<Config>(yaml).is_err());
-    }
-
-    #[test]
-    fn test_should_reject_out_of_range_threshold_on_insert() {
-        let mut thresholds = Thresholds::new();
-        assert!(thresholds.insert("bad", 1.5).is_err());
-        assert!(thresholds.insert("bad", f64::NAN).is_err());
-        assert!(thresholds.insert("good", 0.5).is_ok());
-    }
-
-    #[test]
-    fn test_should_require_return_error_for_missing_threshold() {
-        let thresholds = Thresholds::new();
-        assert!(matches!(
-            thresholds.require("missing"),
-            Err(Error::Invalid { .. })
-        ));
-    }
-
-    #[test]
-    fn test_should_build_retry_config_via_builder_methods() {
-        let retry = RetryConfig::default()
-            .with_max_attempts(5)
-            .with_initial_backoff(Duration::from_millis(50))
-            .with_max_backoff(Duration::from_secs(1));
-        assert_eq!(retry.max_attempts, 5);
-        assert_eq!(retry.initial_backoff, Duration::from_millis(50));
-        assert_eq!(retry.max_backoff, Duration::from_secs(1));
-    }
-
-    #[test]
-    fn test_should_disable_retry_with_one_attempt() {
-        assert_eq!(RetryConfig::disabled().max_attempts, 1);
-    }
-
-    #[test]
-    fn test_surface_path_matches_documented_endpoints() {
-        assert_eq!(Surface::Decisions.path(), "/api/alpha/decisions");
-        assert_eq!(Surface::SystemOne.path(), "/api/v1/systemone");
+    /// Load bounded YAML with duplicate keys, aliases and unknown fields rejected.
+    /// # Errors
+    /// Returns invalid configuration for malformed or invalid settings.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), jev::Error> {
+    /// let config = jev::Config::from_yaml_str("provider: openai\ntimeoutMs: 10000")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "yaml")]
+    pub fn from_yaml_str(text: &str) -> Result<Self, Error> {
+        let config: Self = crate::yaml::parse(text, 64 << 10)
+            .map_err(|_| Error::InvalidConfiguration("YAML configuration"))?;
+        config.settings.validate()?;
+        config.model.resolve(Some(config.provider))?;
+        Ok(config)
     }
 }

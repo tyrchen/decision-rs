@@ -43,15 +43,19 @@ jobs:
           rustup toolchain install nightly --profile minimal --component rustfmt
       - name: install nextest
         uses: taiki-e/install-action@nextest
+      - name: Install feature matrix tooling
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack@0.6.45
       - uses: Swatinem/rust-cache@v2
       # - name: Install Protoc
       #   uses: arduino/setup-protoc@v2
-      - name: Check the package for errors
-        run: cargo check --all
+      - name: Build workspace and check feature combinations
+        run: make build feature-check
       - name: Check formatting and lint rust sources
         run: make lint
       - name: Execute rust tests
-        run: make test
+        run: make test test-no-retry
       - name: Generate a changelog
         uses: orhun/git-cliff-action@v4
         id: git-cliff

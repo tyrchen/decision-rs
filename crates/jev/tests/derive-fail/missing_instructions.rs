@@ -1,9 +1,9 @@
-//! Missing doc comment and missing `#[jev(instructions = ...)]` on a `Noul` field.
-use jev::{Decision, Noul};
+//! Missing doc comment and missing `#[jev(instructions = ...)]` on a `Predicate` field.
+use jev::{Decision, Predicate};
 
 #[derive(Decision)]
 struct Bad {
-    flag: Noul,
+    flag: Predicate,
 }
 
 fn main() {}

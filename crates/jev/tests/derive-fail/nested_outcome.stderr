@@ -1,0 +1,5 @@
+error: unsupported `Decision` field type; expected `Predicate`, `Choice<T>`, `Score<T>`, or `Outcome<_>` of one of those
+ --> tests/derive-fail/nested_outcome.rs:5:12
+  |
+5 |     value: Outcome<Outcome<Predicate>>,
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^

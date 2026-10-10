@@ -1,4 +1,4 @@
-//! `Decision` field of an unsupported type (not `Noul`/`Choice<T>`/`Score<T>`).
+//! `Decision` field of an unsupported type (not `Predicate`/`Choice<T>`/`Score<T>`).
 use jev::Decision;
 
 #[derive(Decision)]

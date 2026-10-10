@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
+## 0.3.0 (unreleased)
+
+### Added
+
+- OpenAI Decisions with provider-aware Luna defaults, alongside OpenRouter Jev,
+  TypeSafe System One and explicit custom endpoints.
+- Provider-neutral `Predicate`, `Choice`, `Score`, `Outcome`, `Probability`,
+  validated input/schema/answers and response provenance/accounting.
+- Canonical JSON evidence, strict version 2 case files, budgeted YAML loading,
+  shared safe connection pools and bounded ordered batches.
+- Explicit refusal handling, complete distribution/score validation, quota-aware
+  error categories, total network deadlines and SDK-owned retry attempts.
+
+### Breaking changes
+
+- Replace Jev-specific Noul/State/Guidance/wire/Surface APIs; remove provider mutation,
+  arbitrary reqwest client injection, optional fields and remote trace passthrough.
+- Choice acceptance now gates on P(selected); native confidence remains separately
+  available through `accept_confidence`.
+- Require validated probabilities, checked typed decoding and explicit custom models.
+- Credentials require deterministic provider selection; generic and multiple keys
+  no longer silently select OpenRouter.
+- Remove native TLS; rustls uses aws-lc-rs. Require Rust 1.99 and version workspace
+  packages at 0.3.0. See [the migration guide](docs/migration-v0.3.md).
+
 ## [0.2.0](https://github.com/tyrchen/jev-typed/releases/tag/v0.2.0) - 2026-10-09
 
 ### Added

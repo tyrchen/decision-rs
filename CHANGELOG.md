@@ -3,23 +3,18 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
-## [0.5.1] - Unreleased
+## [decision-rs-v0.5.1](https://github.com/tyrchen/decision-rs/compare/decision-rs-v0.5.0..decision-rs-v0.5.1) - 2026-10-26
 
 ### Features
 
-- Add `Model::Jev114` for OpenRouter and TypeSafe, including configuration aliases.
-- Default both Jev providers to pinned 1.14; select `Model::Jev113` to preserve
-  previous behavior and evaluate thresholds before switching versions.
+- support Jev 1.14 and bump to 0.5.1 - ([d19e502](https://github.com/tyrchen/decision-rs/commit/d19e50203d8aa68b8400ce297916becdd2011ee2)) - Tyr Chen
 
-### Tests
+### Other
 
-- Cover model parsing, provider compatibility, HTTP routing and override metadata;
-  add opt-in Jev 1.14 and rolling-alias smoke tests.
+- Update CHANGELOG.md - ([c3f13f2](https://github.com/tyrchen/decision-rs/commit/c3f13f2908c44f44201fcbd256c2cf910ce692af)) - Tyr Chen
+- Merge pull request #4 from tyrchen/feat/jev-1.14
 
-### Security
-
-- Raise the Tokio minimum to 1.53.3 and refresh locked rustls, rustls-webpki and
-  webpki-root-certs to patched versions after release auditing.
+feat: support Jev 1.14 and bump to 0.5.1 - ([ba05144](https://github.com/tyrchen/decision-rs/commit/ba05144cd211b6b10b5bc88e8a14f00b8746a7a5)) - Tyr Chen
 
 ---
 ## [decision-rs-v0.5.0](https://github.com/tyrchen/decision-rs/compare/v0.2.0..decision-rs-v0.5.0) - 2026-10-26

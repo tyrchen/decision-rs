@@ -2,74 +2,52 @@
 
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
-## 0.4.0 (unreleased)
+---
+## [decision-rs-v0.5.0](https://github.com/tyrchen/decision-rs/compare/v0.2.0..decision-rs-v0.5.0) - 2026-10-26
 
-### Breaking changes
+### Documentation
 
-- Rename the SDK package from `jev-typed` to `decision-rs` and its Rust import from
-  `jev` to `decision_rs`.
-- Rename `jev-macros` to `decision-macros`; derive helper attributes now use
-  `#[decision(...)]`.
-- Rename SDK environment variables to `DECISION_PROVIDER`, `DECISION_API_KEY` and
-  `DECISION_MODEL`. Provider-specific credential variables remain unchanged.
+- update READMEs for 0.2.0 provider configuration - ([0008e9b](https://github.com/tyrchen/decision-rs/commit/0008e9be684a999e8d4cc4e30980890b9a88ce95)) - Tyr Chen
 
-### Changed
+### Features
 
-- Version both workspace packages at 0.4.0 and move them to `crates/decision-rs`
-  and `crates/decision-macros`.
-- Update package metadata, repository/documentation links, HTTP user agent,
-  examples, release commands and current docs for the provider-neutral name.
-- Add the [0.4 migration guide](docs/migration-v0.4.md). Jev model identifiers and
-  backend protocols remain unchanged.
+-  [**breaking**]unify decision backends and add OpenAI Decisions - ([795df5d](https://github.com/tyrchen/decision-rs/commit/795df5d2cb55b04e57295554aa7c4d012a677232)) - Tyr Chen
+-  [**breaking**]rename SDK to decision-rs 0.4.0 - ([3f7fa93](https://github.com/tyrchen/decision-rs/commit/3f7fa937a2f66ddcdfede547c67adbd8c58f1325)) - Tyr Chen
+- integrate Cloudflare Clef decision models - ([af59158](https://github.com/tyrchen/decision-rs/commit/af591581995ed88404e9cbbe8b55a92bb633718c)) - Tyr Chen
 
-## 0.3.0 (unreleased)
+### Miscellaneous Chores
 
-### Added
+- bump version to 0.5.0 - ([cf7c0ad](https://github.com/tyrchen/decision-rs/commit/cf7c0ad05c66522c40868fb9a5044848c493efc3)) - Tyr Chen
 
-- OpenAI Decisions with provider-aware Luna defaults, alongside OpenRouter Jev,
-  TypeSafe System One and explicit custom endpoints.
-- Provider-neutral `Predicate`, `Choice`, `Score`, `Outcome`, `Probability`,
-  validated input/schema/answers and response provenance/accounting.
-- Canonical JSON evidence, strict version 2 case files, budgeted YAML loading,
-  shared safe connection pools and bounded ordered batches.
-- Explicit refusal handling, complete distribution/score validation, quota-aware
-  error categories, total network deadlines and SDK-owned retry attempts.
+### Other
 
-### Breaking changes
+- Merge pull request #1 from tyrchen/feat/unified-decision-backends
 
-- Replace Jev-specific Noul/State/Guidance/wire/Surface APIs; remove provider mutation,
-  arbitrary reqwest client injection, optional fields and remote trace passthrough.
-- Choice acceptance now gates on P(selected); native confidence remains separately
-  available through `accept_confidence`.
-- Require validated probabilities, checked typed decoding and explicit custom models.
-- Credentials require deterministic provider selection; generic and multiple keys
-  no longer silently select OpenRouter.
-- Remove native TLS; rustls uses aws-lc-rs. Require Rust 1.99 and version workspace
-  packages at 0.3.0. See [the migration guide](docs/migration-v0.3.md).
+feat!: unify decision backends and add OpenAI Decisions - ([e7d4ea7](https://github.com/tyrchen/decision-rs/commit/e7d4ea77f18115d01364fe5e29939a20a64c4a14)) - Tyr Chen
+- Merge pull request #2 from tyrchen/chore/rename-decision-rs-0.4.0
 
-## [0.2.0](https://github.com/tyrchen/decision-rs/releases/tag/v0.2.0) - 2026-10-09
+Rename SDK to decision-rs and bump version to 0.4.0 - ([db3e663](https://github.com/tyrchen/decision-rs/commit/db3e663ff664e40c80b6526281fe13f9b7e7454d)) - Tyr Chen
+- Merge pull request #3 from tyrchen/feat/cloudflare-clef
 
-### Added
+feat: integrate Cloudflare Clef decision models - ([8d39880](https://github.com/tyrchen/decision-rs/commit/8d39880b535bc6f2fa3fccf68df1eeed22a34eac)) - Tyr Chen
 
-- OpenRouter and TypeSafe AI constructors accepting API keys directly:
-  `Client::openrouter`, `Client::typesafe`, and `Client::for_provider`.
-- Provider selection through `Config::provider`, `Client::with_provider`, and
-  `JEV_PROVIDER`, with `TYPESAFE_API_KEY` support and provider-specific key fallback.
-- TypeSafe endpoint and model mapping, including the pinned `jev-1.13.0` model.
-- API key validation and sensitive authorization headers.
-- `make publish-check` and `make publish` for workspace packaging and publication.
+### Tests
 
-### Changed
+- make queued deadline regression deterministic - ([0e87216](https://github.com/tyrchen/decision-rs/commit/0e87216fe020725abe8b6099f33ae539ee968759)) - Tyr Chen
 
-- Both `jev-typed` and `jev-macros` are versioned at 0.2.0.
-- `Config` gains a `provider` field. Full struct literals must specify it or use
-  `..Config::default()`. Existing YAML defaults to OpenRouter.
-- The development toolchain is pinned to Rust 1.99.0.
-- The lockfile uses non-yanked `yoke-derive` 0.8.4.
+---
+## [0.2.0] - 2026-10-09
 
-### Fixed
+### Features
 
-- CI uses the same nightly formatting and Makefile lint/test targets as local development.
-- Macro generation satisfies the pedantic single-pattern match lint.
-- Public case documentation no longer links to a private constant.
-- Generated changelog links point to this repository.
+- implement jev and jev-macros crates per jev-sdk-design.md - ([013b61a](https://github.com/tyrchen/decision-rs/commit/013b61a9c43c96fdcea3e9b2f425a640819a0dab)) - Tyr Chen
+- rename package to jev-rust, adopt prior-art API improvements, add examples - ([382c393](https://github.com/tyrchen/decision-rs/commit/382c393a0040e9a1aad4d0bfc207cecaf5dfe226)) - Tyr Chen
+- support loading cases from yaml file - ([91ac5c8](https://github.com/tyrchen/decision-rs/commit/91ac5c8847ec1c83dab47bd598d12b5dcbbe9cbf)) - Tyr Chen
+- release 0.2.0 with OpenRouter and TypeSafe AI support - ([398d4be](https://github.com/tyrchen/decision-rs/commit/398d4beea65138bb4d8f3bd10684f2f28c3324f1)) - Tyr Chen
+
+### Miscellaneous Chores
+
+- init the project - ([a3ec880](https://github.com/tyrchen/decision-rs/commit/a3ec8809482f5d625483a2610a1af827ba88e4c1)) - Tyr Chen
+- rename to jev-typed for publishing - ([3435ef0](https://github.com/tyrchen/decision-rs/commit/3435ef0a62bec7fd2d1400e6f66c79bf799192f2)) - Tyr Chen
+
+<!-- generated by git-cliff -->

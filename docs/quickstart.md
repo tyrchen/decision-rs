@@ -1,6 +1,6 @@
 # Quickstart
 
-Add `decision-rs = "0.4.0"` and Tokio with `macros` and
+Add `decision-rs = "0.5.1"` and Tokio with `macros` and
 `rt-multi-thread`. Rust 1.99 and edition 2024 are required. Default features include
 derives, bounded retry and rustls with aws-lc-rs.
 
@@ -27,8 +27,32 @@ Jev. `Client::new(provider, key)` supports runtime selection for those providers
 Cloudflare additionally needs an account (see below). Known incompatible
 model/provider combinations fail before sending; custom IDs are sent unchanged
 except on Cloudflare, which accepts only the three known Clef models.
-`Model::Default` resolves to Luna for OpenAI, Jev113 for either Jev provider, and
+`Model::Default` resolves to Luna for OpenAI, Jev114 for either Jev provider, and
 Clef for Cloudflare.
+
+Jev providers default to the pinned `Model::Jev114`: `typesafe/jev-1.14` on
+OpenRouter and `jev-1.14.0` on TypeSafe. These IDs follow the
+[OpenRouter guide](https://openrouter.ai/docs/guides/community/jev) and
+[TypeSafe model reference](https://docs.typesafe.ai/models), checked on 2026-10-25.
+Select a version explicitly with the builder or `DECISION_MODEL`:
+
+```rust,no_run
+# fn setup(key: String) -> Result<(), decision_rs::Error> {
+use decision_rs::{Client, Model, Provider};
+let client = Client::builder(Provider::OpenRouter)
+    .api_key(key)
+    .model(Model::Jev114)
+    .build()?;
+# Ok(())
+# }
+```
+
+`jev-1.14`, `jev-1.14.0`, and `typesafe/jev-1.14` all parse as `Model::Jev114`;
+serialization uses `jev-1.14`. Use `Model::Jev113` (or `DECISION_MODEL=jev-1.13`)
+to retain the previous calibration, and evaluate thresholds before adopting 1.14.
+`Model::JevLatest` remains an explicit rolling alias. This SDK supports Jev 1.14
+through its existing text/JSON input and Predicate, Choice, and Score questions;
+image assets, Box questions and the long-context opt-in are not exposed.
 
 For environment construction, set `DECISION_PROVIDER` and the matching provider key or
 `DECISION_API_KEY`. Without an explicit provider, exactly one provider-specific key can
@@ -83,6 +107,7 @@ Opt-in live smoke tests require the selected credential and may incur charges:
 cargo test --test live --all-features test_should_accept_hosted_protocol::case_1 -- --ignored --exact # OpenAI
 cargo test --test live --all-features test_should_accept_hosted_protocol::case_2 -- --ignored --exact # OpenRouter
 cargo test --test live --all-features test_should_accept_hosted_protocol::case_3 -- --ignored --exact # TypeSafe
+make test-live-jev # Pinned 1.14 and rolling alias on both Jev providers
 make test-live-cloudflare # All three Clef models; token and account required
 ```
 

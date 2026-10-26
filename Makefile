@@ -12,6 +12,9 @@ test-no-retry:
 test-concurrency:
 	@cargo nextest run -p decision-rs --all-features --test wire -E 'test(test_should_include_semaphore_wait_in_deadline_across_clones)' --stress-count 100
 
+test-live-jev:
+	@cargo test -p decision-rs --all-features --test live test_should_accept_jev_114_protocol -- --ignored
+
 test-live-cloudflare:
 	@cargo test -p decision-rs --all-features --test live test_should_accept_cloudflare_clef_protocol -- --ignored
 
@@ -55,4 +58,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test test-no-retry test-concurrency test-live test-live-cloudflare docs lint lint-boundaries feature-check audit secret-check publish-check publish release update-submodule
+.PHONY: build test test-no-retry test-concurrency test-live test-live-jev test-live-cloudflare docs lint lint-boundaries feature-check audit secret-check publish-check publish release update-submodule

@@ -47,6 +47,8 @@ pub enum Model {
     Default,
     /// Pinned Jev 1.13 version.
     Jev113,
+    /// Pinned Jev 1.14 version; the default for `OpenRouter` and `TypeSafe`.
+    Jev114,
     /// Explicit rolling Jev alias.
     JevLatest,
     /// `OpenAI` GPT-6 Luna; the alias does not promise fixed weights.
@@ -65,7 +67,7 @@ impl Model {
         let model = if *self == Self::Default {
             match provider {
                 Some(Provider::OpenAi) => Self::Gpt6Luna,
-                Some(Provider::OpenRouter | Provider::TypeSafe) => Self::Jev113,
+                Some(Provider::OpenRouter | Provider::TypeSafe) => Self::Jev114,
                 Some(Provider::Cloudflare) => Self::Clef,
                 None => return Err(Error::UnsupportedModel),
             }
@@ -76,6 +78,8 @@ impl Model {
             (Self::Gpt6Luna, Some(Provider::OpenAi)) => "gpt-6-luna".to_owned(),
             (Self::Jev113, Some(Provider::OpenRouter)) => "typesafe/jev-1.13".to_owned(),
             (Self::Jev113, Some(Provider::TypeSafe)) => "jev-1.13.0".to_owned(),
+            (Self::Jev114, Some(Provider::OpenRouter)) => "typesafe/jev-1.14".to_owned(),
+            (Self::Jev114, Some(Provider::TypeSafe)) => "jev-1.14.0".to_owned(),
             (Self::JevLatest, Some(Provider::OpenRouter)) => "~typesafe/jev-latest".to_owned(),
             (Self::JevLatest, Some(Provider::TypeSafe)) => "jev-latest".to_owned(),
             (Self::Clef, Some(Provider::Cloudflare)) => "clef".to_owned(),
@@ -103,6 +107,7 @@ fn built_in(value: &str) -> Option<Model> {
         "clef-omni" | "@cf/cloudflare/clef-omni" => Some(Model::ClefOmni),
         "gpt-6-luna" => Some(Model::Gpt6Luna),
         "jev-1.13" | "jev-1.13.0" | "typesafe/jev-1.13" => Some(Model::Jev113),
+        "jev-1.14" | "jev-1.14.0" | "typesafe/jev-1.14" => Some(Model::Jev114),
         "jev-latest" | "~typesafe/jev-latest" => Some(Model::JevLatest),
         _ => None,
     }
@@ -122,6 +127,7 @@ impl fmt::Display for Model {
             Self::ClefOmni => "clef-omni",
             Self::Gpt6Luna => "gpt-6-luna",
             Self::Jev113 => "jev-1.13",
+            Self::Jev114 => "jev-1.14",
             Self::JevLatest => "jev-latest",
             Self::Custom(id) => id.as_str(),
         })
@@ -147,8 +153,12 @@ mod tests {
     use super::*;
     #[rstest]
     #[case(Provider::OpenAi, Model::Default, "gpt-6-luna")]
-    #[case(Provider::OpenRouter, Model::Default, "typesafe/jev-1.13")]
-    #[case(Provider::TypeSafe, Model::Default, "jev-1.13.0")]
+    #[case(Provider::OpenRouter, Model::Default, "typesafe/jev-1.14")]
+    #[case(Provider::TypeSafe, Model::Default, "jev-1.14.0")]
+    #[case(Provider::OpenRouter, Model::Jev113, "typesafe/jev-1.13")]
+    #[case(Provider::TypeSafe, Model::Jev113, "jev-1.13.0")]
+    #[case(Provider::OpenRouter, Model::Jev114, "typesafe/jev-1.14")]
+    #[case(Provider::TypeSafe, Model::Jev114, "jev-1.14.0")]
     #[case(Provider::OpenRouter, Model::JevLatest, "~typesafe/jev-latest")]
     #[case(Provider::TypeSafe, Model::JevLatest, "jev-latest")]
     fn test_should_resolve_model_namespaces(
@@ -163,6 +173,9 @@ mod tests {
     #[case("jev-1.13")]
     #[case("jev-1.13.0")]
     #[case("typesafe/jev-1.13")]
+    #[case("jev-1.14")]
+    #[case("jev-1.14.0")]
+    #[case("typesafe/jev-1.14")]
     #[case("jev-latest")]
     #[case("~typesafe/jev-latest")]
     #[case("default")]
@@ -170,6 +183,26 @@ mod tests {
         let model = Model::Custom(ModelId::try_from(id).unwrap());
         assert!(model.resolve(Some(Provider::OpenAi)).is_err());
         assert!(model.resolve(None).is_err());
+    }
+    #[rstest]
+    #[case("jev-1.14")]
+    #[case("jev-1.14.0")]
+    #[case("typesafe/jev-1.14")]
+    fn test_should_parse_and_serialize_jev_114(#[case] id: &str) {
+        let model: Model = id.parse().unwrap();
+        assert_eq!(model, Model::Jev114);
+        assert_eq!(model.to_string(), "jev-1.14");
+        assert_eq!(
+            serde_json::from_value::<Model>(serde_json::json!(id)).unwrap(),
+            model
+        );
+        assert_eq!(serde_json::to_value(&model).unwrap(), "jev-1.14");
+        for provider in [Some(Provider::OpenAi), Some(Provider::Cloudflare), None] {
+            assert!(matches!(
+                model.resolve(provider),
+                Err(Error::UnsupportedModel)
+            ));
+        }
     }
     #[test]
     fn test_should_preserve_custom_models_and_validate_identifiers() {
@@ -235,6 +268,7 @@ mod clef_tests {
     fn test_should_reject_non_clef_hosted_models_and_preserve_checkpoint_ids() {
         for model in [
             Model::Jev113,
+            Model::Jev114,
             Model::JevLatest,
             Model::Gpt6Luna,
             "other".parse().unwrap(),

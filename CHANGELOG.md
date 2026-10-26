@@ -3,6 +3,25 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [0.5.1] - Unreleased
+
+### Features
+
+- Add `Model::Jev114` for OpenRouter and TypeSafe, including configuration aliases.
+- Default both Jev providers to pinned 1.14; select `Model::Jev113` to preserve
+  previous behavior and evaluate thresholds before switching versions.
+
+### Tests
+
+- Cover model parsing, provider compatibility, HTTP routing and override metadata;
+  add opt-in Jev 1.14 and rolling-alias smoke tests.
+
+### Security
+
+- Raise the Tokio minimum to 1.53.3 and refresh locked rustls, rustls-webpki and
+  webpki-root-certs to patched versions after release auditing.
+
+---
 ## [decision-rs-v0.5.0](https://github.com/tyrchen/decision-rs/compare/v0.2.0..decision-rs-v0.5.0) - 2026-10-26
 
 ### Documentation

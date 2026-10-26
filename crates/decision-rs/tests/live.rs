@@ -42,8 +42,31 @@ struct Review {
 #[tokio::test]
 #[ignore = "requires a selected hosted credential; may incur API charges"]
 async fn test_should_accept_hosted_protocol(#[case] provider: Provider, #[case] key_name: &str) {
+    check_hosted_model(provider, key_name, Model::Default).await;
+}
+
+#[rstest]
+#[case(Provider::OpenRouter, "OPENROUTER_API_KEY", Model::Jev114)]
+#[case(Provider::OpenRouter, "OPENROUTER_API_KEY", Model::JevLatest)]
+#[case(Provider::TypeSafe, "TYPESAFE_API_KEY", Model::Jev114)]
+#[case(Provider::TypeSafe, "TYPESAFE_API_KEY", Model::JevLatest)]
+#[tokio::test]
+#[ignore = "requires a selected Jev provider credential; may incur API charges"]
+async fn test_should_accept_jev_114_protocol(
+    #[case] provider: Provider,
+    #[case] key_name: &str,
+    #[case] model: Model,
+) {
+    check_hosted_model(provider, key_name, model).await;
+}
+
+async fn check_hosted_model(provider: Provider, key_name: &str, model: Model) {
     let key = std::env::var(key_name).expect("selected provider credential is required");
-    let client = Client::new(provider, key).unwrap();
+    let client = Client::builder(provider)
+        .api_key(key)
+        .model(model)
+        .build()
+        .unwrap();
     let result = client
         .decide_with::<Review>(
             RequestOptions::new("The screen arrived broken. Please refund me.").unwrap(),
@@ -51,6 +74,10 @@ async fn test_should_accept_hosted_protocol(#[case] provider: Provider, #[case] 
         .await
         .unwrap();
     assert_eq!(result.meta.provider, Some(provider));
+    assert_eq!(&result.meta.resolved_model, client.model());
+    if client.model() == &Model::Jev114 {
+        assert!(result.meta.returned_model.contains("jev-1.14"));
+    }
     assert!(!result.meta.returned_model.is_empty());
     assert!(matches!(result.value.defect, Outcome::Answered(_)));
     assert!(matches!(result.value.refund, Outcome::Answered(_)));

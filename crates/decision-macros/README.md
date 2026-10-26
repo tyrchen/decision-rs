@@ -1,6 +1,6 @@
 # decision-macros
 
-Derives for `decision-rs` 0.4.0, re-exported through its default `derive` feature.
+Derives for `decision-rs` 0.5.1, re-exported through its default `derive` feature.
 Depend on `decision-rs` with library name `decision_rs`; generated code uses `::decision_rs`.
 
 `Decision` accepts concrete named structs with 1–64 `Predicate`, `Choice<T>`,

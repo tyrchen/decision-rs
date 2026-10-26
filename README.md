@@ -7,7 +7,7 @@ same business types, acceptance methods and error categories work on every backe
 
 ```toml
 [dependencies]
-decision-rs = "0.4.0"
+decision-rs = "0.5.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -75,9 +75,13 @@ produce an ambiguity error. `DECISION_MODEL` optionally overrides the provider-a
 | Provider | Default model |
 |---|---|
 | OpenAI | `gpt-6-luna` |
-| OpenRouter | `typesafe/jev-1.13` |
-| TypeSafe | `jev-1.13.0` |
+| OpenRouter | `typesafe/jev-1.14` |
+| TypeSafe | `jev-1.14.0` |
 | Cloudflare | `clef` |
+
+Jev defaults are pinned to 1.14. Select `Model::Jev113` explicitly to retain
+1.13, or `Model::JevLatest` to follow releases. Re-evaluate model-specific thresholds
+when switching versions. Jev 1.14 uses the existing text/JSON decision interface.
 
 For Clef, construct `Client::cloudflare(account_id.parse()?, token)?` or use
 `Client::builder(Provider::Cloudflare).cloudflare_account(account).api_key(token)`.
@@ -110,6 +114,7 @@ ambiguous failures after sending. Evidence, schemas, bodies and concurrency are 
 Run `make build`, `make test`, `make lint`, `make feature-check`, `make audit`, and
 `make publish-check` for the release gates. `make test-live` requires all four
 provider credentials plus the Cloudflare account and can incur API charges; individual provider filters are
-shown in the quickstart. `make test-live-cloudflare` runs only the three Clef models.
+shown in the quickstart. `make test-live-jev` checks pinned 1.14 and the rolling alias;
+`make test-live-cloudflare` runs only the three Clef models.
 The nine examples cover typed/dynamic questions, thresholds,
 sampling, batches, custom endpoints and case files.

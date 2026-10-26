@@ -609,6 +609,11 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_partial_json, header, method, path},
+    };
 
     use super::*;
     fn environment(entries: &[(&str, &str)]) -> Result<Client, Error> {
@@ -618,6 +623,96 @@ mod tests {
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| (*value).to_owned()))
         })
+    }
+    #[rstest]
+    #[case(
+        Provider::OpenRouter,
+        "/api/alpha/decisions",
+        "typesafe/jev-1.14",
+        "typesafe/jev-1.13",
+        "~typesafe/jev-latest"
+    )]
+    #[case(
+        Provider::TypeSafe,
+        "/v1/systemone",
+        "jev-1.14.0",
+        "jev-1.13.0",
+        "jev-latest"
+    )]
+    #[tokio::test]
+    async fn test_should_send_jev_versions_and_preserve_default_metadata(
+        #[case] provider: Provider,
+        #[case] route: &str,
+        #[case] current: &str,
+        #[case] previous: &str,
+        #[case] latest: &str,
+    ) {
+        let server = MockServer::start().await;
+        let mut client = Client::new(provider, "fixture-key").unwrap();
+        let inner = Arc::get_mut(&mut client.inner).unwrap();
+        let Target::Fixed(endpoint) = &mut inner.target else {
+            panic!("Jev providers must use a fixed endpoint");
+        };
+        assert_eq!(endpoint.url.path(), route);
+        // Remap only the origin; keep the hosted provider, protocol and route.
+        endpoint.url = format!("{}{route}", server.uri()).parse().unwrap();
+        let schema = Questions::builder()
+            .predicate("p", "Condition?")
+            .build()
+            .unwrap();
+        for (wire, count) in [(current, 3), (previous, 1), (latest, 1)] {
+            let returned = if wire == previous {
+                "jev-1.13.0"
+            } else {
+                "jev-1.14.0"
+            };
+            Mock::given(method("POST"))
+                .and(path(route))
+                .and(header("authorization", "Bearer fixture-key"))
+                .and(body_partial_json(
+                    json!({"model":wire,"state":"ticket","questions":{
+                        "p":{"type":"noul","instructions":"Condition?"}
+                    }}),
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "model":returned, "answers":{"p":{"type":"noul","noul":0.8}},
+                    "usage":{"input_tokens":12,"output_tokens":0}
+                })))
+                .expect(count)
+                .mount(&server)
+                .await;
+        }
+        for (requested, resolved, wire) in [
+            (Model::Default, Model::Jev114, current),
+            (Model::Jev114, Model::Jev114, current),
+            (Model::Jev113, Model::Jev113, previous),
+            (Model::JevLatest, Model::JevLatest, latest),
+            (Model::Default, Model::Jev114, current),
+        ] {
+            let result = client
+                .execute(
+                    RequestOptions::new("ticket")
+                        .unwrap()
+                        .model(requested.clone()),
+                    &schema,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.meta.provider, Some(provider));
+            assert_eq!(result.meta.requested_model, requested);
+            assert_eq!(result.meta.resolved_model, resolved);
+            assert_eq!(result.meta.wire_model, wire);
+            assert_eq!(
+                result.meta.returned_model,
+                if resolved == Model::Jev113 {
+                    "jev-1.13.0"
+                } else {
+                    "jev-1.14.0"
+                }
+            );
+            assert_eq!(result.meta.usage.input_tokens, 12);
+            assert_eq!(client.model(), &Model::Jev114);
+        }
     }
     #[rstest]
     #[case("openai", Provider::OpenAi)]

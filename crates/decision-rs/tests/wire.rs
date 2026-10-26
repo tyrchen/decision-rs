@@ -507,8 +507,8 @@ async fn test_should_disable_redirects() {
 #[test]
 fn test_should_resolve_hosted_defaults_and_reject_known_mismatches() {
     assert_eq!(Client::openai("key").unwrap().model(), &Model::Gpt6Luna);
-    assert_eq!(Client::openrouter("key").unwrap().model(), &Model::Jev113);
-    assert_eq!(Client::typesafe("key").unwrap().model(), &Model::Jev113);
+    assert_eq!(Client::openrouter("key").unwrap().model(), &Model::Jev114);
+    assert_eq!(Client::typesafe("key").unwrap().model(), &Model::Jev114);
     assert!(matches!(
         Client::builder(Provider::OpenAi)
             .api_key("key")

@@ -2,9 +2,12 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{Error, Model, Probability, Provider, question::validate_key};
+use crate::{
+    CloudflareAccountId, Error, Model, Probability, Provider, account::validate_account,
+    question::validate_key,
+};
 
 /// Retry policy. Retry-After is honored even beyond the computed backoff cap.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -210,6 +213,13 @@ impl Settings {
 pub struct Config {
     /// Hosted provider.
     pub provider: Provider,
+    /// Account required only for Cloudflare; never an API token.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_account"
+    )]
+    pub cloudflare_account_id: Option<CloudflareAccountId>,
     /// Logical model; Default resolves for the provider.
     #[serde(default)]
     pub model: Model,
@@ -230,9 +240,30 @@ impl Config {
     pub fn new(provider: Provider) -> Self {
         Self {
             provider,
+            cloudflare_account_id: None,
             model: Model::Default,
             settings: Settings::default(),
         }
+    }
+    /// Configure Cloudflare with a validated account and the default Clef model.
+    ///
+    /// ```
+    /// let account = "0123456789abcdef0123456789abcdef".parse()?;
+    /// let config = decision_rs::Config::cloudflare(account);
+    /// assert_eq!(config.provider, decision_rs::Provider::Cloudflare);
+    /// # Ok::<(), decision_rs::Error>(())
+    /// ```
+    #[must_use]
+    pub fn cloudflare(account: CloudflareAccountId) -> Self {
+        let mut config = Self::new(Provider::Cloudflare);
+        config.cloudflare_account_id = Some(account);
+        config
+    }
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        validate_account(self.provider, self.cloudflare_account_id.as_ref())?;
+        self.settings.validate()?;
+        self.model.resolve(Some(self.provider))?;
+        Ok(())
     }
     /// Load bounded YAML with duplicate keys, aliases and unknown fields rejected.
     /// # Errors
@@ -248,8 +279,68 @@ impl Config {
     pub fn from_yaml_str(text: &str) -> Result<Self, Error> {
         let config: Self = crate::yaml::parse(text, 64 << 10)
             .map_err(|_| Error::InvalidConfiguration("YAML configuration"))?;
-        config.settings.validate()?;
-        config.model.resolve(Some(config.provider))?;
+        config.validate()?;
         Ok(config)
+    }
+}
+
+// Missing is optional; explicit null is not a valid account identifier.
+fn deserialize_account<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<CloudflareAccountId>, D::Error> {
+    CloudflareAccountId::deserialize(d).map(Some)
+}
+
+#[cfg(test)]
+mod cloudflare_tests {
+    use super::*;
+
+    #[test]
+    fn test_should_validate_provider_account_pairing_and_redact_debug() {
+        let account = "0123456789abcdef0123456789abcdef";
+        let mut config = Config::cloudflare(account.parse().unwrap());
+        assert!(config.validate().is_ok());
+        assert!(!format!("{config:?}").contains(account));
+        config.provider = Provider::OpenAi;
+        assert!(config.validate().is_err());
+        assert!(Config::new(Provider::Cloudflare).validate().is_err());
+        let plain = serde_json::to_value(Config::new(Provider::OpenAi)).unwrap();
+        assert!(plain.get("cloudflareAccountId").is_none());
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!(""),
+            serde_json::json!(" "),
+        ] {
+            let mut value_config = plain.clone();
+            value_config["cloudflareAccountId"] = value;
+            assert!(serde_json::from_value::<Config>(value_config).is_err());
+        }
+    }
+    #[cfg(feature = "yaml")]
+    #[test]
+    fn test_should_validate_cloudflare_yaml_and_preserve_strict_flattened_fields() {
+        let yaml = "provider: cloudflare\ncloudflareAccountId: \
+                    '0123456789abcdef0123456789abcdef'\nmodel: clef-flash\ntimeoutMs: 9000\n";
+        let config = Config::from_yaml_str(yaml).unwrap();
+        assert_eq!(config.model, Model::ClefFlash);
+        assert_eq!(config.settings.timeout_ms, 9000);
+        let json = serde_json::to_value(&config).unwrap();
+        let roundtrip: Config = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            roundtrip.cloudflare_account_id,
+            config.cloudflare_account_id
+        );
+        for invalid in [
+            format!("{yaml}typo: true\n"),
+            format!("{yaml}token: secret\n"),
+            format!("{yaml}model: clef\n"),
+            format!("{yaml}cloudflareAccountId: null\n"),
+            "provider: cloudflare\n".to_owned(),
+            yaml.replace("provider: cloudflare", "provider: openai"),
+            yaml.replace("'0123456789abcdef0123456789abcdef'", "null"),
+            yaml.replace("'0123456789abcdef0123456789abcdef'", "'invalid'"),
+        ] {
+            assert!(Config::from_yaml_str(&invalid).is_err(), "{invalid}");
+        }
     }
 }

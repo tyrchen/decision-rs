@@ -23,9 +23,12 @@ async fn review(key: String) -> Result<(), decision_rs::Error> {
 ```
 
 Replace only the constructor with `Client::openrouter` or `Client::typesafe` to use
-Jev. `Client::new(provider, key)` supports runtime selection. Known incompatible
-model/provider combinations fail before sending; custom IDs are sent unchanged.
-`Model::Default` resolves to Luna for OpenAI and Jev113 for either Jev provider.
+Jev. `Client::new(provider, key)` supports runtime selection for those providers;
+Cloudflare additionally needs an account (see below). Known incompatible
+model/provider combinations fail before sending; custom IDs are sent unchanged
+except on Cloudflare, which accepts only the three known Clef models.
+`Model::Default` resolves to Luna for OpenAI, Jev113 for either Jev provider, and
+Clef for Cloudflare.
 
 For environment construction, set `DECISION_PROVIDER` and the matching provider key or
 `DECISION_API_KEY`. Without an explicit provider, exactly one provider-specific key can
@@ -77,10 +80,83 @@ Client clones additionally share concurrency permits.
 Opt-in live smoke tests require the selected credential and may incur charges:
 
 ```sh
-cargo test --test live --all-features -- --ignored case_1 # OpenAI
-cargo test --test live --all-features -- --ignored case_2 # OpenRouter
-cargo test --test live --all-features -- --ignored case_3 # TypeSafe
+cargo test --test live --all-features test_should_accept_hosted_protocol::case_1 -- --ignored --exact # OpenAI
+cargo test --test live --all-features test_should_accept_hosted_protocol::case_2 -- --ignored --exact # OpenRouter
+cargo test --test live --all-features test_should_accept_hosted_protocol::case_3 -- --ignored --exact # TypeSafe
+make test-live-cloudflare # All three Clef models; token and account required
 ```
 
 See [primitives](primitives.md), [thresholds](thresholds.md), [cases](cases.md),
 and [migration](migration-v0.4.md).
+
+## Cloudflare-hosted Clef
+
+Use a Workers AI API token and your 32-character hexadecimal account ID. The
+account is separate from the secret token. Load both through your application or
+secret manager; constructors never read the environment implicitly.
+
+```rust,no_run
+# fn setup(account_id: &str, token: String) -> Result<(), decision_rs::Error> {
+use decision_rs::{Client, CloudflareAccountId, Model, Provider};
+let account = CloudflareAccountId::try_from(account_id)?;
+let client = Client::builder(Provider::Cloudflare)
+    .cloudflare_account(account)
+    .api_key(token)
+    .model(Model::ClefFlash)
+    .build()?;
+# Ok(())
+# }
+```
+
+`Client::cloudflare(account, token)?` selects Clef. `Client::new(Cloudflare, token)`
+fails because it cannot supply an account. Available variants are `Clef`,
+`ClefFlash`, and `ClefOmni`; their short names are `clef`, `clef-flash`, and
+`clef-omni`. Parsing also accepts the corresponding full `@cf/cloudflare/...`
+identifiers. The SDK sends the full ID in the route and the short name in the
+body. `RequestOptions::model` overrides both for one call without changing clones.
+Other Workers AI models and custom hosted IDs are rejected locally.
+
+For `Client::from_env()`, select `DECISION_PROVIDER=cloudflare`, load
+`CLOUDFLARE_API_TOKEN` (or `DECISION_API_KEY`) and `CLOUDFLARE_ACCOUNT_ID`, and optionally
+set `DECISION_MODEL=clef-flash`. Without a provider, a sole Cloudflare token selects
+Cloudflare but still requires the account; an account alone never selects a provider.
+The SDK does not read the `CLOUDFLARE_AUTH_TOKEN` name used in some upstream examples.
+
+```yaml
+provider: cloudflare
+cloudflareAccountId: "0123456789abcdef0123456789abcdef" # Replace with your account
+model: clef-flash
+timeoutMs: 10000
+```
+
+Load with `Config::from_yaml_str` and `Client::from_config(config, token)`, or use
+`Config::cloudflare(account)` programmatically. Account IDs on other providers,
+null/invalid account IDs, and secrets in YAML are rejected.
+
+All three models accept text and canonical JSON through this SDK. Media input is
+not exposed. Workers AI may truncate long state; byte limits are not token limits
+and do not prove that every piece of evidence was processed. Model aliases may
+change weights. `wire_model` records the body selector, `routing_model` the full
+path model ID, and `returned_model` the server's actual model field. Cost remains
+unavailable unless reported by the service. Native confidence is preserved and
+must not be substituted for event probability.
+
+For user-hosted Clef, use an actual joint-head-aware System One server:
+
+```rust,no_run
+# fn setup() -> Result<(), decision_rs::Error> {
+use decision_rs::{Auth, Client, Endpoint};
+let endpoint = Endpoint::clef_system_one("http://127.0.0.1:30000/v1/systemone")?;
+let client = Client::for_endpoint(endpoint, Auth::None, "Cloudflare/clef".parse()?)?;
+# Ok(())
+# }
+```
+
+This endpoint expects the bare System One response and applies Clef rounding
+bounds; it does not require a Cloudflare account. The checkpoint ID stays a custom
+model. The short `clef`, `clef-flash`, and `clef-omni` names are now reserved hosted
+aliases; custom deployments should use their checkpoint ID or another server alias. A normal chat-completions server is insufficient. The
+[SGLang Clef cookbook](https://docs.sglang.io/cookbook/autoregressive/Cloudflare/clef)
+covers Clef/Flash; verify serving version, image digest, effective context and
+confidence semantics separately. Omni deployment is not established by that guide.
+See the [research record](research/cloudflare-clef.md) for sources and evidence limits.

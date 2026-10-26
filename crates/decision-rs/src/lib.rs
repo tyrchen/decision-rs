@@ -1,4 +1,4 @@
-//! Typed decisions with a uniform API across `OpenAI`, `OpenRouter` and `TypeSafe`.
+//! Typed decisions across `OpenAI`, `OpenRouter`, `TypeSafe` and Cloudflare Clef.
 //!
 //! Declare a schema once, then select the backend when constructing the client.
 //! Public answers are validated against the same schema on every backend.
@@ -37,6 +37,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, missing_debug_implementations, rust_2024_compatibility)]
 
+mod account;
 mod answer;
 mod backend;
 #[cfg(feature = "batch")]
@@ -51,11 +52,13 @@ mod metadata;
 mod model;
 mod provider;
 mod question;
+mod target;
 mod transport;
 mod typed;
 #[cfg(feature = "yaml")]
 mod yaml;
 
+pub use account::CloudflareAccountId;
 pub use answer::{Answer, Answers, ChoiceAnswer, Distribution, ScoreAnswer};
 #[cfg(feature = "batch")]
 pub use batch::{decide_all, run_cases};

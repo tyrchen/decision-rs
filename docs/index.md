@@ -11,3 +11,4 @@
 | [migration-from-prompt-and-parse.md](migration-from-prompt-and-parse.md) | Replace prose classification with typed decisions. |
 | [research/openai-decisions.md](research/openai-decisions.md) | API findings, protocol constraints and primary sources. |
 | [research/decision-runtime-dependencies.md](research/decision-runtime-dependencies.md) | Bounded YAML and HTTP retry dependency decisions. |
+| [research/cloudflare-clef.md](research/cloudflare-clef.md) | Cloudflare Clef family research: current hosted models, primary sources, pinned reference code, repository gaps and evidence limits. |

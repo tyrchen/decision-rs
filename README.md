@@ -1,6 +1,7 @@
 # decision-rs
 
-Typed decisions for OpenAI Decisions, OpenRouter Jev and TypeSafe System One.
+Typed decisions for OpenAI Decisions, OpenRouter Jev, TypeSafe System One and
+Cloudflare Workers AI Clef.
 Declare questions once and select a provider when constructing the client. The
 same business types, acceptance methods and error categories work on every backend.
 
@@ -65,8 +66,9 @@ Model calibration can differ, so evaluate thresholds for each model.
 backend. Runtime schemas use `Questions::builder`; `Client::ask` returns checked,
 declaration-ordered answers and metadata. No provider wire types enter business code.
 
-Set `DECISION_PROVIDER=openai|openrouter|typesafe` and either `DECISION_API_KEY` or the matching
-`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `TYPESAFE_API_KEY`. With no provider, exactly
+Set `DECISION_PROVIDER=openai|openrouter|typesafe|cloudflare` and either `DECISION_API_KEY` or the matching
+`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `TYPESAFE_API_KEY`, or `CLOUDFLARE_API_TOKEN`.
+Cloudflare also requires `CLOUDFLARE_ACCOUNT_ID`. With no provider, exactly
 one provider-specific key is required. Multiple keys or an unassigned generic key
 produce an ambiguity error. `DECISION_MODEL` optionally overrides the provider-aware default.
 
@@ -75,6 +77,14 @@ produce an ambiguity error. `DECISION_MODEL` optionally overrides the provider-a
 | OpenAI | `gpt-6-luna` |
 | OpenRouter | `typesafe/jev-1.13` |
 | TypeSafe | `jev-1.13.0` |
+| Cloudflare | `clef` |
+
+For Clef, construct `Client::cloudflare(account_id.parse()?, token)?` or use
+`Client::builder(Provider::Cloudflare).cloudflare_account(account).api_key(token)`.
+Select `Model::ClefFlash` or `Model::ClefOmni` explicitly; the SDK supports text and
+canonical JSON for all three. Model overrides change both URL and body atomically.
+Cloudflare can truncate long state to its token window: SDK byte limits do not
+ensure complete evidence. Evaluate each model's thresholds independently.
 
 Clients freeze provider, model and credentials together. `Client::builder` accepts
 validated runtime settings and an SDK-controlled `HttpClient` pool that can be
@@ -98,7 +108,8 @@ ambiguous failures after sending. Evidence, schemas, bodies and concurrency are 
 [0.4 migration](docs/migration-v0.4.md) · [Design](specs/unified-decision-backends-design.md)
 
 Run `make build`, `make test`, `make lint`, `make feature-check`, `make audit`, and
-`make publish-check` for the release gates. `make test-live` requires all three
-provider credentials and can incur API charges; individual provider filters are
-shown in the quickstart. The nine examples cover typed/dynamic questions, thresholds,
+`make publish-check` for the release gates. `make test-live` requires all four
+provider credentials plus the Cloudflare account and can incur API charges; individual provider filters are
+shown in the quickstart. `make test-live-cloudflare` runs only the three Clef models.
+The nine examples cover typed/dynamic questions, thresholds,
 sampling, batches, custom endpoints and case files.

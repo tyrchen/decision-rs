@@ -51,6 +51,12 @@ pub enum Model {
     JevLatest,
     /// `OpenAI` GPT-6 Luna; the alias does not promise fixed weights.
     Gpt6Luna,
+    /// Cloudflare Clef rolling alias.
+    Clef,
+    /// Cloudflare Clef Flash rolling alias.
+    ClefFlash,
+    /// Cloudflare Clef Omni rolling alias (text input in this SDK).
+    ClefOmni,
     /// A validated, uninterpreted model identifier.
     Custom(ModelId),
 }
@@ -59,7 +65,8 @@ impl Model {
         let model = if *self == Self::Default {
             match provider {
                 Some(Provider::OpenAi) => Self::Gpt6Luna,
-                Some(_) => Self::Jev113,
+                Some(Provider::OpenRouter | Provider::TypeSafe) => Self::Jev113,
+                Some(Provider::Cloudflare) => Self::Clef,
                 None => return Err(Error::UnsupportedModel),
             }
         } else {
@@ -71,6 +78,10 @@ impl Model {
             (Self::Jev113, Some(Provider::TypeSafe)) => "jev-1.13.0".to_owned(),
             (Self::JevLatest, Some(Provider::OpenRouter)) => "~typesafe/jev-latest".to_owned(),
             (Self::JevLatest, Some(Provider::TypeSafe)) => "jev-latest".to_owned(),
+            (Self::Clef, Some(Provider::Cloudflare)) => "clef".to_owned(),
+            (Self::ClefFlash, Some(Provider::Cloudflare)) => "clef-flash".to_owned(),
+            (Self::ClefOmni, Some(Provider::Cloudflare)) => "clef-omni".to_owned(),
+            (Self::Custom(_), Some(Provider::Cloudflare)) => return Err(Error::UnsupportedModel),
             (Self::Custom(id), _) => {
                 if built_in(id.as_str()).is_some() {
                     return Err(Error::InvalidConfiguration(
@@ -87,6 +98,9 @@ impl Model {
 fn built_in(value: &str) -> Option<Model> {
     match value {
         "default" => Some(Model::Default),
+        "clef" | "@cf/cloudflare/clef" => Some(Model::Clef),
+        "clef-flash" | "@cf/cloudflare/clef-flash" => Some(Model::ClefFlash),
+        "clef-omni" | "@cf/cloudflare/clef-omni" => Some(Model::ClefOmni),
         "gpt-6-luna" => Some(Model::Gpt6Luna),
         "jev-1.13" | "jev-1.13.0" | "typesafe/jev-1.13" => Some(Model::Jev113),
         "jev-latest" | "~typesafe/jev-latest" => Some(Model::JevLatest),
@@ -103,6 +117,9 @@ impl fmt::Display for Model {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Default => "default",
+            Self::Clef => "clef",
+            Self::ClefFlash => "clef-flash",
+            Self::ClefOmni => "clef-omni",
             Self::Gpt6Luna => "gpt-6-luna",
             Self::Jev113 => "jev-1.13",
             Self::JevLatest => "jev-latest",
@@ -169,5 +186,74 @@ mod tests {
             assert!(id.parse::<Model>().is_err());
         }
         assert!("a".repeat(129).parse::<Model>().is_err());
+    }
+}
+
+#[cfg(test)]
+mod clef_tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case("clef", Model::Clef)]
+    #[case("clef-flash", Model::ClefFlash)]
+    #[case("clef-omni", Model::ClefOmni)]
+    fn test_should_parse_clef_aliases_and_reject_incompatible_providers(
+        #[case] name: &str,
+        #[case] model: Model,
+    ) {
+        assert_eq!(name.parse::<Model>().unwrap(), model);
+        assert_eq!(
+            format!("@cf/cloudflare/{name}").parse::<Model>().unwrap(),
+            model
+        );
+        assert_eq!(model.to_string(), name);
+        assert_eq!(
+            serde_json::from_value::<Model>(serde_json::to_value(&model).unwrap()).unwrap(),
+            model
+        );
+        assert_eq!(model.resolve(Some(Provider::Cloudflare)).unwrap().1, name);
+        for provider in [
+            Some(Provider::OpenAi),
+            Some(Provider::OpenRouter),
+            Some(Provider::TypeSafe),
+            None,
+        ] {
+            assert!(matches!(
+                model.resolve(provider),
+                Err(Error::UnsupportedModel)
+            ));
+            assert!(
+                Model::Custom(ModelId::try_from(name).unwrap())
+                    .resolve(provider)
+                    .is_err()
+            );
+        }
+    }
+    #[test]
+    fn test_should_reject_non_clef_hosted_models_and_preserve_checkpoint_ids() {
+        for model in [
+            Model::Jev113,
+            Model::JevLatest,
+            Model::Gpt6Luna,
+            "other".parse().unwrap(),
+            "Cloudflare/clef".parse().unwrap(),
+        ] {
+            assert!(matches!(
+                model.resolve(Some(Provider::Cloudflare)),
+                Err(Error::UnsupportedModel)
+            ));
+        }
+        assert_eq!(
+            "Cloudflare/clef"
+                .parse::<Model>()
+                .unwrap()
+                .resolve(None)
+                .unwrap()
+                .1,
+            "Cloudflare/clef"
+        );
+        assert!("@cf/cloudflare/unknown".parse::<Model>().is_err());
     }
 }

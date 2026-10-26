@@ -13,6 +13,8 @@ use crate::error::Error;
 pub enum Provider {
     /// `OpenAI` Decisions.
     OpenAi,
+    /// Cloudflare Workers AI Clef decisions.
+    Cloudflare,
     /// `OpenRouter` Jev Decisions.
     OpenRouter,
     /// `TypeSafe` AI System One.
@@ -22,6 +24,7 @@ impl Provider {
     pub(crate) fn key_env(self) -> &'static str {
         match self {
             Self::OpenAi => "OPENAI_API_KEY",
+            Self::Cloudflare => "CLOUDFLARE_API_TOKEN",
             Self::OpenRouter => "OPENROUTER_API_KEY",
             Self::TypeSafe => "TYPESAFE_API_KEY",
         }
@@ -31,6 +34,7 @@ impl fmt::Display for Provider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::OpenAi => "openai",
+            Self::Cloudflare => "cloudflare",
             Self::OpenRouter => "openrouter",
             Self::TypeSafe => "typesafe",
         })
@@ -41,6 +45,7 @@ impl FromStr for Provider {
     fn from_str(value: &str) -> Result<Self, Error> {
         match value {
             "openai" => Ok(Self::OpenAi),
+            "cloudflare" => Ok(Self::Cloudflare),
             "openrouter" => Ok(Self::OpenRouter),
             "typesafe" => Ok(Self::TypeSafe),
             _ => Err(Error::InvalidConfiguration("unknown provider")),

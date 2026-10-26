@@ -124,7 +124,7 @@ impl fmt::Debug for Endpoint {
     }
 }
 impl Endpoint {
-    fn new(url: &str, backend: Backend) -> Result<Self, Error> {
+    pub(crate) fn new(url: &str, backend: Backend) -> Result<Self, Error> {
         if url.len() > 2048 {
             return Err(Error::InvalidConfiguration("endpoint length"));
         }
@@ -162,6 +162,18 @@ impl Endpoint {
     /// ```
     pub fn system_one(url: &str) -> Result<Self, Error> {
         Self::new(url, Backend::SystemOne)
+    }
+    /// Declare a self-hosted Clef System One endpoint with bounded rounding tolerance.
+    /// # Errors
+    /// Rejects invalid or insecure URLs. Use a custom checkpoint model identifier.
+    ///
+    /// ```no_run
+    /// let endpoint = decision_rs::Endpoint::clef_system_one("http://127.0.0.1:30000/v1/systemone")?;
+    /// let client = decision_rs::Client::for_endpoint(endpoint, decision_rs::Auth::None, "Cloudflare/clef".parse()?)?;
+    /// # Ok::<(), decision_rs::Error>(())
+    /// ```
+    pub fn clef_system_one(url: &str) -> Result<Self, Error> {
+        Self::new(url, Backend::ClefSystemOne)
     }
     /// Declare a complete Jev Decisions endpoint.
     /// # Errors
@@ -318,6 +330,11 @@ impl Transport {
         let request_id = response
             .headers()
             .get("x-request-id")
+            .or_else(|| {
+                matches!(backend, Backend::Cloudflare)
+                    .then(|| response.headers().get("cf-ray"))
+                    .flatten()
+            })
             .map(|value| {
                 value
                     .to_str()

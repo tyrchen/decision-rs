@@ -35,6 +35,8 @@ pub struct ResponseMeta {
     pub resolved_model: Model,
     /// Exact model ID sent.
     pub wire_model: String,
+    /// Separate URL model identifier for model-routed providers; never an account URL.
+    pub routing_model: Option<String>,
     /// Model string returned by the server.
     pub returned_model: String,
     /// Server request header identifier.

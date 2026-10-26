@@ -1,8 +1,8 @@
 //! Opt-in hosted protocol smoke tests. Credentials select a provider explicitly.
 
 use decision_rs::{
-    Choice, ChoiceOptions, Client, Decision, Outcome, Predicate, Provider, RequestOptions, Score,
-    ScoreLevels,
+    Answer, Choice, ChoiceOptions, Client, Decision, Distribution, Input, Model, Outcome,
+    Predicate, Provider, RequestOptions, Score, ScoreLevels,
 };
 use rstest::rstest;
 
@@ -56,4 +56,81 @@ async fn test_should_accept_hosted_protocol(#[case] provider: Provider, #[case] 
     assert!(matches!(result.value.refund, Outcome::Answered(_)));
     assert!(matches!(result.value.team, Outcome::Answered(_)));
     assert!(matches!(result.value.urgency, Outcome::Answered(_)));
+}
+
+/// Explicitly opt-in: synthetic inputs only; three Workers AI models incur charges.
+#[rstest]
+#[case(Model::Clef)]
+#[case(Model::ClefFlash)]
+#[case(Model::ClefOmni)]
+#[tokio::test]
+#[ignore = "requires CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID; incurs API charges"]
+async fn test_should_accept_cloudflare_clef_protocol(#[case] model: Model) {
+    let token = std::env::var("CLOUDFLARE_API_TOKEN").expect("Cloudflare token required");
+    let account = std::env::var("CLOUDFLARE_ACCOUNT_ID")
+        .expect("Cloudflare account required")
+        .parse()
+        .unwrap();
+    let client = Client::builder(Provider::Cloudflare)
+        .cloudflare_account(account)
+        .api_key(token)
+        .model(model.clone())
+        .build()
+        .unwrap();
+    let inputs = [
+        Input::try_from("The screen arrived broken. Please refund me.").unwrap(),
+        Input::try_from("屏幕收到时已经损坏，请退款。").unwrap(),
+        Input::json(&serde_json::json!({"ticket":"Refund for broken screen", "urgent":true}))
+            .unwrap(),
+    ];
+    for input in inputs {
+        let result = client
+            .ask(input, Review::questions().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(result.meta.provider, Some(Provider::Cloudflare));
+        assert_eq!(result.meta.resolved_model, model);
+        assert_eq!(result.meta.wire_model, model.to_string());
+        assert_eq!(
+            result.meta.routing_model,
+            Some(format!("@cf/cloudflare/{model}"))
+        );
+        assert!(!result.meta.returned_model.is_empty());
+        assert!(result.meta.usage.input_tokens > 0);
+        for (_, answer) in result.answers.iter() {
+            match answer {
+                Answer::Predicate(p) => assert!((0.0..=1.0).contains(&p.probability().get())),
+                Answer::Choice(c) => {
+                    assert!(matches!(c.probabilities(), Distribution::Reported(_)))
+                }
+                Answer::Score(s) => assert!(matches!(s.probabilities(), Distribution::Reported(_))),
+                _ => panic!("synthetic smoke requires answered questions"),
+            }
+        }
+        Review::from_answers(&result.answers).unwrap();
+    }
+    let override_model = if model == Model::ClefFlash {
+        Model::ClefOmni
+    } else {
+        Model::ClefFlash
+    };
+    let result = client
+        .decide_with::<Review>(
+            RequestOptions::new("Refund the broken screen.")
+                .unwrap()
+                .model(override_model.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.meta.resolved_model, override_model);
+    assert_eq!(
+        result.meta.routing_model,
+        Some(format!("@cf/cloudflare/{override_model}"))
+    );
+    let restored = client
+        .decide_with::<Review>(RequestOptions::new("Refund the broken screen.").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(restored.meta.resolved_model, model);
+    assert_eq!(client.model(), &model);
 }

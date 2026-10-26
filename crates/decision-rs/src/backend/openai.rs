@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    Decoded, WireUsage, bounded_identifier, choice, distribution, predicate, refusal, score,
+    Decoded, NumericPolicy, WireUsage, bounded_identifier, choice, distribution, predicate,
+    refusal, score,
 };
 use crate::{
     Answer, Answers, Distribution, Error, Input, Probability, Question as DomainQuestion,
@@ -223,7 +224,12 @@ fn decode_answer(key: &str, question: &DomainQuestion, wire: WireAnswer) -> Resu
                     )),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let probs = distribution(key, &["true".to_owned(), "false".to_owned()], Some(entries))?;
+            let probs = distribution(
+                key,
+                &["true".to_owned(), "false".to_owned()],
+                Some(entries),
+                NumericPolicy::Standard,
+            )?;
             let Distribution::Reported(probs) = probs else {
                 return Err(Error::for_question(key, "boolean distribution unavailable"));
             };
@@ -256,6 +262,7 @@ fn decode_answer(key: &str, question: &DomainQuestion, wire: WireAnswer) -> Resu
                 options.iter().map(|(k, _)| k.clone()).collect(),
                 Some(confidence),
                 Some(entries),
+                NumericPolicy::Standard,
             )?
         }
         (
@@ -284,6 +291,7 @@ fn decode_answer(key: &str, question: &DomainQuestion, wire: WireAnswer) -> Resu
                 levels.iter().map(|(k, _)| k.clone()).collect(),
                 Some(confidence),
                 Some(entries),
+                NumericPolicy::Standard,
             )?
         }
         _ => return Err(Error::for_question(key, "answer kind differs from schema")),

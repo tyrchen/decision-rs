@@ -1,5 +1,6 @@
 //! Private protocol compilation and validation against the original schema.
 
+mod cloudflare;
 mod jev;
 mod openai;
 
@@ -16,6 +17,8 @@ pub(crate) enum Backend {
     Jev,
     SystemOne,
     OpenAi,
+    Cloudflare,
+    ClefSystemOne,
 }
 /// The immutable schema is the response plan; boolean predicates are interpreted
 /// only according to the backend and the presence of both criteria.
@@ -38,14 +41,20 @@ impl Backend {
     ) -> Result<Vec<u8>, Error> {
         match self {
             Self::OpenAi => openai::prepare(input, questions, model, limit),
-            Self::Jev | Self::SystemOne => jev::prepare(input, questions, model, limit),
+            Self::Jev | Self::SystemOne | Self::Cloudflare | Self::ClefSystemOne => {
+                jev::prepare(input, questions, model, limit)
+            }
         }
     }
     pub fn decode(self, body: &[u8], plan: &ResponsePlan<'_>) -> Result<Decoded, Error> {
         let value = json::parse(body, 4096, 256)?;
         match self {
             Self::OpenAi => openai::decode(value, plan.questions),
-            Self::Jev | Self::SystemOne => jev::decode(value, plan.questions),
+            Self::Jev | Self::SystemOne => {
+                jev::decode(value, plan.questions, NumericPolicy::Standard)
+            }
+            Self::ClefSystemOne => jev::decode(value, plan.questions, NumericPolicy::Clef),
+            Self::Cloudflare => cloudflare::decode(value, plan.questions),
         }
     }
     pub fn http_error(
@@ -55,31 +64,39 @@ impl Backend {
         retry_after_secs: Option<u64>,
         request_id: Option<String>,
     ) -> Error {
-        let dto = json::parse(bytes, 4096, 256)
-            .ok()
-            .and_then(|v| serde_json::from_value::<ErrorEnvelope>(v).ok());
-        let code = dto
-            .as_ref()
-            .and_then(|d| d.error.code.as_deref())
-            .and_then(|s| bounded_identifier(s, 128).ok());
-        let quota = dto.as_ref().is_some_and(|d| {
-            d.error.kind.as_deref() == Some("insufficient_quota")
-                || matches!(
-                    d.error.code.as_deref(),
-                    Some(
-                        "insufficient_quota"
-                            | "credit_balance_exhausted"
-                            | "organization_spend_limit_exceeded"
-                            | "project_spend_limit_exceeded"
-                            | "organization_usage_limit_exceeded"
-                    )
-                )
-        });
+        let (code, quota) = if matches!(self, Self::Cloudflare) {
+            let codes = cloudflare::error_codes(bytes);
+            let quota = codes.iter().any(|code| code.parse::<u64>() == Ok(3036));
+            (codes.into_iter().next(), quota)
+        } else {
+            let dto = json::parse(bytes, 4096, 256)
+                .ok()
+                .and_then(|v| serde_json::from_value::<ErrorEnvelope>(v).ok());
+            let code = dto
+                .as_ref()
+                .and_then(|d| d.error.code.as_deref())
+                .and_then(|s| bounded_identifier(s, 128).ok());
+            let quota = matches!(self, Self::OpenAi)
+                && dto.as_ref().is_some_and(|d| {
+                    d.error.kind.as_deref() == Some("insufficient_quota")
+                        || matches!(
+                            d.error.code.as_deref(),
+                            Some(
+                                "insufficient_quota"
+                                    | "credit_balance_exhausted"
+                                    | "organization_spend_limit_exceeded"
+                                    | "project_spend_limit_exceeded"
+                                    | "organization_usage_limit_exceeded"
+                            )
+                        )
+                });
+            (code, quota)
+        };
         match status {
             401 => Error::Authentication,
             403 => Error::PermissionDenied,
             402 => Error::QuotaExceeded,
-            429 if matches!(self, Self::OpenAi) && quota => Error::QuotaExceeded,
+            429 if quota => Error::QuotaExceeded,
             429 => Error::RateLimited { retry_after_secs },
             400 | 413 | 422 => Error::InvalidInput("upstream rejected request"),
             _ => Error::Api {
@@ -157,10 +174,26 @@ impl WireUsage {
         })
     }
 }
+/// Numeric tolerance is a codec property, never a global relaxation.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum NumericPolicy {
+    Standard,
+    Clef,
+}
+impl NumericPolicy {
+    fn mass_tolerance(self, count: usize) -> Result<f64, Error> {
+        let count = u32::try_from(count).map_err(|_| Error::protocol("option count"))?;
+        Ok(match self {
+            Self::Standard => 0.001,
+            Self::Clef => f64::from(count) * 0.00005 + 1e-9,
+        })
+    }
+}
 pub(super) fn distribution(
     key: &str,
     keys: &[String],
     entries: Option<Vec<(String, Probability)>>,
+    policy: NumericPolicy,
 ) -> Result<Distribution, Error> {
     let Some(entries) = entries else {
         return Ok(Distribution::Unavailable);
@@ -175,7 +208,8 @@ pub(super) fn distribution(
         }
     }
     if reported.len() != keys.len()
-        || (reported.values().map(|p| p.get()).sum::<f64>() - 1.0).abs() > 0.001
+        || (reported.values().map(|p| p.get()).sum::<f64>() - 1.0).abs()
+            > policy.mass_tolerance(keys.len())?
     {
         return Err(Error::for_question(
             key,
@@ -198,13 +232,14 @@ pub(super) fn choice(
     keys: Vec<String>,
     confidence: Option<Probability>,
     entries: Option<Vec<(String, Probability)>>,
+    policy: NumericPolicy,
 ) -> Result<Answer, Error> {
     if !keys.contains(&selected) {
         return Err(Error::for_question(key, "unknown choice"));
     }
     Ok(Answer::Choice(ChoiceAnswer {
         choice: selected,
-        probabilities: distribution(key, &keys, entries)?,
+        probabilities: distribution(key, &keys, entries, policy)?,
         options: keys,
         confidence,
     }))
@@ -216,21 +251,28 @@ pub(super) fn score(
     keys: Vec<String>,
     confidence: Option<Probability>,
     entries: Option<Vec<(String, Probability)>>,
+    policy: NumericPolicy,
 ) -> Result<Answer, Error> {
     let max = keys.len().saturating_sub(1) as f64;
     if !raw.is_finite() || !(0.0..=max).contains(&raw) {
         return Err(Error::for_question(key, "score bounds"));
     }
     let indices: Vec<String> = (0..keys.len()).map(|i| i.to_string()).collect();
-    let distribution = distribution(key, &indices, entries)?;
+    let distribution = distribution(key, &indices, entries, policy)?;
     if let Distribution::Reported(probs) = &distribution {
         let mean = probs
             .values()
             .enumerate()
             .map(|(i, p)| i as f64 * p.get())
-            .sum::<f64>()
-            / probs.values().map(|p| p.get()).sum::<f64>();
-        if (mean - raw).abs() > 0.001 * max.max(1.0) {
+            .sum::<f64>();
+        let (mean, tolerance) = match policy {
+            NumericPolicy::Standard => (
+                mean / probs.values().map(|p| p.get()).sum::<f64>(),
+                0.001 * max.max(1.0),
+            ),
+            NumericPolicy::Clef => (mean, 0.00005 * (1.0 + max * (max + 1.0) / 2.0) + 1e-9),
+        };
+        if (mean - raw).abs() > tolerance {
             return Err(Error::for_question(
                 key,
                 "score disagrees with distribution",
@@ -279,7 +321,7 @@ mod tests {
         fn test_should_preserve_reported_probability_mass(p in 0.0_f64..1.0) {
             let keys = vec!["a".to_owned(), "b".to_owned()];
             let entries = vec![("b".to_owned(), Probability::try_from(1.0-p).unwrap()), ("a".to_owned(), Probability::try_from(p).unwrap())];
-            let distribution = distribution("q", &keys, Some(entries)).unwrap();
+            let distribution = distribution("q", &keys, Some(entries), NumericPolicy::Standard).unwrap();
             prop_assert_eq!(distribution.get("a").unwrap().get(), p);
             prop_assert_eq!(distribution.get("b").unwrap().get(), 1.0-p);
         }

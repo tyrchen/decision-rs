@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
-    matchers::{body_json, header, method, path},
+    matchers::{body_json, body_partial_json, header, method, path},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ChoiceOptions)]
@@ -704,9 +704,7 @@ async fn test_should_stop_retries_when_cancelled() {
 async fn test_should_keep_batch_order_and_per_item_errors() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(wiremock::matchers::body_partial_json(
-            json!({"input":"first"}),
-        ))
+        .and(body_partial_json(json!({"input":"first"})))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(triage_body(true))
@@ -715,9 +713,7 @@ async fn test_should_keep_batch_order_and_per_item_errors() {
         .mount(&server)
         .await;
     Mock::given(method("POST"))
-        .and(wiremock::matchers::body_partial_json(
-            json!({"input":"second"}),
-        ))
+        .and(body_partial_json(json!({"input":"second"})))
         .respond_with(ResponseTemplate::new(403))
         .mount(&server)
         .await;
@@ -871,4 +867,47 @@ async fn test_should_decode_unordered_choice_keys_with_checked_enum_mapping() {
         .unwrap();
     let team: Choice<Team> = response.answers.decode("team").unwrap();
     assert_eq!(team.value(), &Team::Billing);
+}
+
+#[tokio::test]
+async fn test_should_use_clef_system_one_with_existing_typed_decisions() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/systemone"))
+        .and(body_partial_json(json!({"model":"Cloudflare/clef"})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(triage_body(false))
+                .insert_header("cf-ray", "not-hosted"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let endpoint = Endpoint::clef_system_one(&format!("{}/v1/systemone", server.uri())).unwrap();
+    let client =
+        Client::for_endpoint(endpoint, Auth::None, "Cloudflare/clef".parse().unwrap()).unwrap();
+    let response = client
+        .decide_with::<Triage>(RequestOptions::new("ticket").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.value.team.value(), &Team::Billing);
+    assert_eq!(
+        response.value.team.accept_confidence(p(0.8)),
+        Some(&Team::Billing)
+    );
+    assert!(response.value.team.accept(p(0.8)).is_none());
+    assert_eq!(response.value.refund.probability(), p(0.3));
+    assert_eq!(response.value.urgency.raw(), 0.8);
+    assert_eq!(response.meta.provider, None);
+    assert_eq!(response.meta.routing_model, None);
+    assert_eq!(response.meta.request_id, None);
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        !requests
+            .first()
+            .unwrap()
+            .headers
+            .contains_key("authorization")
+    );
+    assert!(Endpoint::clef_system_one("http://example.com/v1/systemone").is_err());
 }

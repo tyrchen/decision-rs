@@ -39,3 +39,10 @@ Compare false positives, false negatives, refusal rate, automation coverage, lat
 and usage on the same labelled set. Record metadata's requested/resolved/wire/returned
 models and SDK version. The Luna alias does not guarantee fixed weights. Costs are
 reported only when supplied by the provider; missing cost never means free usage.
+
+For Cloudflare Clef, Clef Flash and Clef Omni, calibrate each model independently.
+The self-hosted reference implementation and SGLang can report different native
+confidence statistics even for the same weights. Clef's rounded probability
+vectors are preserved as reported, within a count-dependent rounding bound;
+they are not silently normalized. A high confidence does not prove that long
+state was preserved: Workers AI can truncate it to fit the context window.

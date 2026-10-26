@@ -4,7 +4,9 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{Decoded, WireUsage, bounded_identifier, choice, predicate, refusal, score};
+use super::{
+    Decoded, NumericPolicy, WireUsage, bounded_identifier, choice, predicate, refusal, score,
+};
 use crate::{Answers, Error, Input, Probability, Questions, json, question::Kind};
 
 #[derive(Serialize)]
@@ -112,7 +114,11 @@ enum WireAnswer {
     #[serde(rename = "refusal")]
     Refusal,
 }
-pub(super) fn decode(value: Value, questions: &Questions) -> Result<Decoded, Error> {
+pub(super) fn decode(
+    value: Value,
+    questions: &Questions,
+    policy: NumericPolicy,
+) -> Result<Decoded, Error> {
     let mut response: Response =
         serde_json::from_value(value).map_err(|_| Error::protocol("Jev envelope"))?;
     if response.answers.len() != questions.len()
@@ -144,6 +150,7 @@ pub(super) fn decode(value: Value, questions: &Questions) -> Result<Decoded, Err
                 options.iter().map(|(k, _)| k.clone()).collect(),
                 confidence,
                 probabilities.map(|p| p.into_iter().collect()),
+                policy,
             )?,
             (
                 Kind::Score(levels),
@@ -169,6 +176,7 @@ pub(super) fn decode(value: Value, questions: &Questions) -> Result<Decoded, Err
                     levels.iter().map(|(k, _)| k.clone()).collect(),
                     confidence,
                     probabilities.map(|p| p.into_iter().collect()),
+                    policy,
                 )?
             }
             _ => return Err(Error::for_question(key, "answer kind differs from schema")),

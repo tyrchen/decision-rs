@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file. See [conven
 ---
 ## [unreleased]
 
+### Other
+
+- Update CHANGELOG.md - ([515fd47](https://github.com/tyrchen/decision-rs/commit/515fd479717dfb56eb77152ab513751ca1b54377)) - Tyr Chen
+
+---
+## [decision-rs-v0.6.0](https://github.com/tyrchen/decision-rs/compare/decision-rs-v0.5.1..decision-rs-v0.6.0) - 2026-11-12
+
 ### Features
 
 -  [**breaking**]add Gemini Decisions provider and bump to 0.6.0 - ([2c51a0b](https://github.com/tyrchen/decision-rs/commit/2c51a0ba85cc77ea0065550c57a67ca6f738fb94)) - Tyr Chen

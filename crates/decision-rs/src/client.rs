@@ -194,7 +194,7 @@ impl Client {
         settings: Settings,
     ) -> Result<Self, Error> {
         settings.validate()?;
-        auth.header()?;
+        auth.validate()?;
         let resolved_model = target.resolve(&model, provider)?.model;
         let http = match http {
             Some(http) => http,
@@ -292,6 +292,19 @@ impl Client {
     pub fn openrouter(key: impl Into<SecretString>) -> Result<Self, Error> {
         Self::new(Provider::OpenRouter, key)
     }
+    /// Connect to Google Gemini Decisions with `gemini-decision-1`.
+    /// # Errors
+    /// Rejects an invalid key or HTTP initialization failure.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), decision_rs::Error> {
+    /// let client = decision_rs::Client::gemini("application-loaded-key")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn gemini(key: impl Into<SecretString>) -> Result<Self, Error> {
+        Self::new(Provider::Gemini, key)
+    }
     /// Connect to `TypeSafe` System One.
     /// # Errors
     /// Rejects an invalid key or HTTP initialization failure.
@@ -347,7 +360,7 @@ impl Client {
     ) -> Result<Self, Error> {
         let generic = read("DECISION_API_KEY")?;
         if let Some(key) = &generic {
-            Auth::ApiKey(SecretString::from(key.clone())).header()?;
+            Auth::ApiKey(SecretString::from(key.clone())).validate()?;
         }
         let (provider, key) = if let Some(raw) = read("DECISION_PROVIDER")? {
             let provider = Provider::from_str(&raw)?;
@@ -366,9 +379,10 @@ impl Client {
                 Provider::OpenRouter,
                 Provider::TypeSafe,
                 Provider::Cloudflare,
+                Provider::Gemini,
             ] {
                 if let Some(key) = read(provider.key_env())? {
-                    Auth::ApiKey(SecretString::from(key.clone())).header()?;
+                    Auth::ApiKey(SecretString::from(key.clone())).validate()?;
                     if selected.is_some() {
                         return Err(Error::AmbiguousProvider);
                     }
@@ -703,12 +717,12 @@ mod tests {
             assert_eq!(result.meta.resolved_model, resolved);
             assert_eq!(result.meta.wire_model, wire);
             assert_eq!(
-                result.meta.returned_model,
-                if resolved == Model::Jev113 {
+                result.meta.returned_model.as_deref(),
+                Some(if resolved == Model::Jev113 {
                     "jev-1.13.0"
                 } else {
                     "jev-1.14.0"
-                }
+                })
             );
             assert_eq!(result.meta.usage.input_tokens, 12);
             assert_eq!(client.model(), &Model::Jev114);
@@ -842,7 +856,13 @@ mod cloudflare_tests {
         .unwrap();
         assert_eq!(explicit.model(), &Model::ClefFlash);
         assert_eq!(
-            explicit.inner.auth.header().unwrap().unwrap(),
+            explicit
+                .inner
+                .auth
+                .header(Backend::Cloudflare)
+                .unwrap()
+                .unwrap()
+                .1,
             "Bearer generic"
         );
         assert!(matches!(
@@ -967,7 +987,7 @@ mod cloudflare_tests {
             ),
         ] {
             assert_eq!(result.meta.wire_model, name);
-            assert_eq!(result.meta.returned_model, name);
+            assert_eq!(result.meta.returned_model.as_deref(), Some(name));
             assert_eq!(
                 result.meta.routing_model,
                 Some(format!("@cf/cloudflare/{name}"))
@@ -1200,5 +1220,211 @@ mod cloudflare_tests {
         let result = send_model(&hosted(Settings::default()), &server, Model::Default).await;
         assert!(matches!(result, Err(Error::Api { status: 302, .. })));
         assert!(destination.received_requests().await.unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod gemini_tests {
+    use rstest::rstest;
+    use serde_json::{Value, json};
+    use wiremock::{
+        Mock, MockServer, Request, ResponseTemplate,
+        matchers::{body_json, header, method, path},
+    };
+
+    use super::*;
+    use crate::{Answer, backend::Backend};
+
+    const ROUTE: &str = "/v1beta/decisions";
+    fn hosted(server: &MockServer, settings: Settings) -> Client {
+        let mut client = Client::builder(Provider::Gemini)
+            .api_key("fixture-key")
+            .settings(settings)
+            .build()
+            .unwrap();
+        let inner = Arc::get_mut(&mut client.inner).unwrap();
+        let Target::Fixed(endpoint) = &mut inner.target else {
+            panic!("Gemini must use a fixed endpoint");
+        };
+        assert_eq!(
+            endpoint.url.as_str(),
+            "https://generativelanguage.googleapis.com/v1beta/decisions"
+        );
+        // Remap only the origin; keep the hosted provider, protocol and route.
+        endpoint.url = format!("{}{ROUTE}", server.uri()).parse().unwrap();
+        client
+    }
+    fn schema() -> Questions {
+        Questions::builder()
+            .predicate_with(
+                "refund",
+                "Refund requested?",
+                "Money back.",
+                "No money back.",
+            )
+            .build()
+            .unwrap()
+    }
+    fn answered() -> Value {
+        json!({"answers":{"refund":{"type":"noul","noul":0.97,"confidence":0.97}},
+            "usage":{"total_input_tokens":21,"input_tokens_by_modality":[{"modality":"text","tokens":21}],
+                "total_output_tokens":0,"total_tokens":21}})
+    }
+    fn environment(entries: &[(&str, &str)]) -> Result<Client, Error> {
+        Client::from_environment(|name| {
+            Ok(entries
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned()))
+        })
+    }
+    #[tokio::test]
+    async fn test_should_send_google_api_key_and_omit_returned_model() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(ROUTE))
+            .and(header("x-goog-api-key", "fixture-key"))
+            .and(header("content-type", "application/json"))
+            .and(body_json(json!({"model":"gemini-decision-1","input":"Please refund me.",
+                "questions":{"refund":{"type":"noul","instructions":"Refund requested?",
+                    "criteria":{"true_description":"Money back.","false_description":"No money back."}}}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answered()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = hosted(&server, Settings::default());
+        let result = client.ask("Please refund me.", &schema()).await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let sent: &Request = &requests[0];
+        assert!(sent.headers.get("authorization").is_none());
+        assert_eq!(result.meta.provider, Some(Provider::Gemini));
+        assert_eq!(result.meta.requested_model, Model::Default);
+        assert_eq!(result.meta.resolved_model, Model::GeminiDecision1);
+        assert_eq!(result.meta.wire_model, "gemini-decision-1");
+        assert_eq!(result.meta.routing_model, None);
+        assert_eq!(result.meta.returned_model, None);
+        assert_eq!(result.meta.response_id, None);
+        assert_eq!(result.meta.usage.input_tokens, 21);
+        assert_eq!(result.meta.usage.total_tokens, 21);
+        let Some(Answer::Predicate(refund)) = result.answers.get("refund") else {
+            panic!("predicate expected");
+        };
+        assert_eq!(refund.probability().get(), 0.97);
+    }
+    #[rstest]
+    #[case("0s", true)]
+    #[case("60s", false)]
+    #[tokio::test]
+    async fn test_should_wait_for_body_retry_info(#[case] delay: &str, #[case] fits: bool) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(json!({"error":{
+                "code":429,"status":"RESOURCE_EXHAUSTED","details":[
+                    {"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":delay}]}})))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answered()))
+            .mount(&server)
+            .await;
+        let client = hosted(&server, Settings::default());
+        let result = client.ask("Please refund me.", &schema()).await;
+        match (fits && cfg!(feature = "retry"), result) {
+            (true, Ok(response)) => assert_eq!(response.meta.attempts, 2),
+            (false, Err(Error::Timeout)) if cfg!(feature = "retry") => {}
+            (false, Err(Error::RateLimited { retry_after_secs })) => {
+                assert!(!cfg!(feature = "retry") && retry_after_secs.is_some());
+            }
+            (_, other) => panic!("unexpected result {other:?}"),
+        }
+        let expected = if fits && cfg!(feature = "retry") {
+            2
+        } else {
+            1
+        };
+        assert_eq!(server.received_requests().await.unwrap().len(), expected);
+    }
+    #[tokio::test]
+    async fn test_should_not_retry_invalid_google_api_keys() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error":{
+                "code":400,"message":"API key not valid.","status":"INVALID_ARGUMENT","details":[
+                    {"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"API_KEY_INVALID"}]}})))
+            .mount(&server)
+            .await;
+        let client = hosted(&server, Settings::default());
+        assert!(matches!(
+            client.ask("Please refund me.", &schema()).await,
+            Err(Error::Authentication)
+        ));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+    #[test]
+    fn test_should_resolve_gemini_construction_paths() {
+        let client = Client::gemini("key").unwrap();
+        assert_eq!(client.provider(), Some(Provider::Gemini));
+        assert_eq!(client.model(), &Model::GeminiDecision1);
+        assert_eq!(
+            client
+                .inner
+                .auth
+                .header(Backend::Gemini)
+                .unwrap()
+                .unwrap()
+                .0,
+            "x-goog-api-key"
+        );
+        let inferred = environment(&[("GEMINI_API_KEY", "key")]).unwrap();
+        assert_eq!(inferred.provider(), Some(Provider::Gemini));
+        let explicit = environment(&[
+            ("DECISION_PROVIDER", "gemini"),
+            ("DECISION_API_KEY", "generic"),
+            ("OPENAI_API_KEY", "ignored"),
+        ])
+        .unwrap();
+        assert_eq!(explicit.provider(), Some(Provider::Gemini));
+        assert!(matches!(
+            environment(&[("GEMINI_API_KEY", "a"), ("OPENAI_API_KEY", "b")]),
+            Err(Error::AmbiguousProvider)
+        ));
+        assert!(matches!(
+            environment(&[("DECISION_PROVIDER", "gemini"), ("OPENAI_API_KEY", "b")]),
+            Err(Error::MissingCredentials)
+        ));
+        for model in [Model::Gpt6Luna, Model::Jev114, Model::Clef] {
+            assert!(matches!(
+                Client::builder(Provider::Gemini)
+                    .api_key("key")
+                    .model(model)
+                    .build(),
+                Err(Error::UnsupportedModel)
+            ));
+        }
+        assert!(matches!(
+            Client::openai("key")
+                .unwrap()
+                .inner
+                .target
+                .resolve(&Model::GeminiDecision1, Some(Provider::OpenAi)),
+            Err(Error::UnsupportedModel)
+        ));
+        assert!(
+            Client::builder(Provider::Gemini)
+                .cloudflare_account("0123456789abcdef0123456789abcdef".parse().unwrap())
+                .api_key("key")
+                .build()
+                .is_err()
+        );
+        assert!(matches!(
+            Client::gemini("key with space"),
+            Err(Error::InvalidConfiguration("API key bounds"))
+        ));
+        assert!(matches!(
+            Client::gemini("密钥"),
+            Err(Error::InvalidConfiguration("API key bounds"))
+        ));
     }
 }

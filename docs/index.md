@@ -2,7 +2,7 @@
 
 | Doc | Summary |
 |---|---|
-| [quickstart.md](quickstart.md) | Hosted/custom clients, Jev 1.14 defaults and version selection, configuration, features and live smoke commands. |
+| [quickstart.md](quickstart.md) | Hosted/custom clients, Jev 1.14 defaults and version selection, Gemini Decisions, Cloudflare Clef, configuration, features and live smoke commands. |
 | [primitives.md](primitives.md) | Predicate, Choice, Score, Outcome and checked dynamic answers. |
 | [thresholds.md](thresholds.md) | Event probability, native confidence, escalation and model-specific evaluation. |
 | [cases.md](cases.md) | Strict version 2 JSON/YAML cases and bounded execution. |
@@ -11,4 +11,5 @@
 | [migration-from-prompt-and-parse.md](migration-from-prompt-and-parse.md) | Replace prose classification with typed decisions. |
 | [research/openai-decisions.md](research/openai-decisions.md) | API findings, protocol constraints and primary sources. |
 | [research/decision-runtime-dependencies.md](research/decision-runtime-dependencies.md) | Bounded YAML and HTTP retry dependency decisions. |
+| [research/gemini-decisions.md](research/gemini-decisions.md) | Gemini Decisions API research: protocol facts, error probes against the production endpoint, SDK mapping and evidence limits. |
 | [research/cloudflare-clef.md](research/cloudflare-clef.md) | Cloudflare Clef family research: current hosted models, primary sources, pinned reference code, repository gaps and evidence limits. |

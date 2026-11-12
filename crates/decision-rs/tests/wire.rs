@@ -151,7 +151,10 @@ async fn test_should_preserve_typed_semantics_across_protocols(#[case] openai: b
     assert_eq!(response.meta.usage.total_tokens, 15);
     assert_eq!(response.meta.attempts, 1);
     assert_eq!(response.meta.wire_model, "fixture-model");
-    assert_eq!(response.meta.returned_model, "returned-model");
+    assert_eq!(
+        response.meta.returned_model.as_deref(),
+        Some("returned-model")
+    );
     let dynamic = client
         .ask("ticket", Triage::questions().unwrap())
         .await
@@ -910,4 +913,40 @@ async fn test_should_use_clef_system_one_with_existing_typed_decisions() {
             .contains_key("authorization")
     );
     assert!(Endpoint::clef_system_one("http://example.com/v1/systemone").is_err());
+}
+#[tokio::test]
+async fn test_should_use_google_api_key_header_for_custom_gemini_endpoints() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1beta/decisions"))
+        .and(header("x-goog-api-key", "fixture-key"))
+        .and(body_partial_json(
+            json!({"model":"fixture-model","input":"ticket"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "answers":{"defect":{"type":"noul","noul":0.9,"confidence":0.9}},
+            "usage":{"total_input_tokens":5}})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let endpoint =
+        Endpoint::gemini_decisions(&format!("{}/v1beta/decisions", server.uri())).unwrap();
+    let client = Client::for_endpoint_with(
+        endpoint,
+        Auth::ApiKey("fixture-key".into()),
+        "fixture-model".parse().unwrap(),
+        HttpClient::new().unwrap(),
+        settings(),
+    )
+    .unwrap();
+    let schema = Questions::builder()
+        .predicate("defect", "Is this a defect?")
+        .build()
+        .unwrap();
+    let response = client.ask("ticket", &schema).await.unwrap();
+    assert_eq!(response.meta.provider, None);
+    assert_eq!(response.meta.returned_model, None);
+    assert_eq!(response.meta.usage.total_tokens, 5);
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests[0].headers.get("authorization").is_none());
 }

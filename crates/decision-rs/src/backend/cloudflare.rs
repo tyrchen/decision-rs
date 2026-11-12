@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use super::{Decoded, NumericPolicy, jev};
+use super::{Decoded, ErrorSummary, NumericPolicy, jev};
 use crate::{Error, Questions, json};
 
 const MAX_DETAILS: usize = 32;
@@ -69,7 +69,15 @@ fn error_code(value: &Value) -> Option<String> {
     }
 }
 
-pub(super) fn error_codes(bytes: &[u8]) -> Vec<String> {
+pub(super) fn error_summary(bytes: &[u8]) -> ErrorSummary {
+    let codes = error_codes(bytes);
+    ErrorSummary {
+        quota: codes.iter().any(|code| code.parse::<u64>() == Ok(3036)),
+        code: codes.into_iter().next(),
+        ..ErrorSummary::default()
+    }
+}
+fn error_codes(bytes: &[u8]) -> Vec<String> {
     let Ok(value) = json::parse(bytes, 4096, 256) else {
         return Vec::new();
     };
@@ -122,7 +130,7 @@ mod tests {
             json!({"result":inner(),"success":true,"errors":[],"messages":[],"extension":"allowed"}),
         ] {
             let decoded = decode_fixture(envelope).unwrap();
-            assert_eq!(decoded.model, "clef");
+            assert_eq!(decoded.model.as_deref(), Some("clef"));
             assert_eq!(decoded.usage.input_tokens, 12);
             assert_eq!(decoded.usage.output_tokens, 0);
             assert_eq!(decoded.usage.total_tokens, 12);

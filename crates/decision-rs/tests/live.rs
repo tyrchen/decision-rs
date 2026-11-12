@@ -39,6 +39,7 @@ struct Review {
 #[case(Provider::OpenAi, "OPENAI_API_KEY")]
 #[case(Provider::OpenRouter, "OPENROUTER_API_KEY")]
 #[case(Provider::TypeSafe, "TYPESAFE_API_KEY")]
+#[case(Provider::Gemini, "GEMINI_API_KEY")]
 #[tokio::test]
 #[ignore = "requires a selected hosted credential; may incur API charges"]
 async fn test_should_accept_hosted_protocol(#[case] provider: Provider, #[case] key_name: &str) {
@@ -76,9 +77,19 @@ async fn check_hosted_model(provider: Provider, key_name: &str, model: Model) {
     assert_eq!(result.meta.provider, Some(provider));
     assert_eq!(&result.meta.resolved_model, client.model());
     if client.model() == &Model::Jev114 {
-        assert!(result.meta.returned_model.contains("jev-1.14"));
+        assert!(
+            result
+                .meta
+                .returned_model
+                .as_deref()
+                .is_some_and(|model| model.contains("jev-1.14"))
+        );
     }
-    assert!(!result.meta.returned_model.is_empty());
+    // Gemini reports no model; every other hosted protocol must.
+    assert_eq!(
+        result.meta.returned_model.is_some(),
+        provider != Provider::Gemini
+    );
     assert!(matches!(result.value.defect, Outcome::Answered(_)));
     assert!(matches!(result.value.refund, Outcome::Answered(_)));
     assert!(matches!(result.value.team, Outcome::Answered(_)));
@@ -122,7 +133,13 @@ async fn test_should_accept_cloudflare_clef_protocol(#[case] model: Model) {
             result.meta.routing_model,
             Some(format!("@cf/cloudflare/{model}"))
         );
-        assert!(!result.meta.returned_model.is_empty());
+        assert!(
+            result
+                .meta
+                .returned_model
+                .as_deref()
+                .is_some_and(|model| !model.is_empty())
+        );
         assert!(result.meta.usage.input_tokens > 0);
         for (_, answer) in result.answers.iter() {
             match answer {

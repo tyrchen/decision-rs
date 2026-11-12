@@ -59,6 +59,8 @@ pub enum Model {
     ClefFlash,
     /// Cloudflare Clef Omni rolling alias (text input in this SDK).
     ClefOmni,
+    /// Google Gemini Decision 1 (text input in this SDK); the Gemini default.
+    GeminiDecision1,
     /// A validated, uninterpreted model identifier.
     Custom(ModelId),
 }
@@ -69,6 +71,7 @@ impl Model {
                 Some(Provider::OpenAi) => Self::Gpt6Luna,
                 Some(Provider::OpenRouter | Provider::TypeSafe) => Self::Jev114,
                 Some(Provider::Cloudflare) => Self::Clef,
+                Some(Provider::Gemini) => Self::GeminiDecision1,
                 None => return Err(Error::UnsupportedModel),
             }
         } else {
@@ -85,6 +88,7 @@ impl Model {
             (Self::Clef, Some(Provider::Cloudflare)) => "clef".to_owned(),
             (Self::ClefFlash, Some(Provider::Cloudflare)) => "clef-flash".to_owned(),
             (Self::ClefOmni, Some(Provider::Cloudflare)) => "clef-omni".to_owned(),
+            (Self::GeminiDecision1, Some(Provider::Gemini)) => "gemini-decision-1".to_owned(),
             (Self::Custom(_), Some(Provider::Cloudflare)) => return Err(Error::UnsupportedModel),
             (Self::Custom(id), _) => {
                 if built_in(id.as_str()).is_some() {
@@ -105,6 +109,7 @@ fn built_in(value: &str) -> Option<Model> {
         "clef" | "@cf/cloudflare/clef" => Some(Model::Clef),
         "clef-flash" | "@cf/cloudflare/clef-flash" => Some(Model::ClefFlash),
         "clef-omni" | "@cf/cloudflare/clef-omni" => Some(Model::ClefOmni),
+        "gemini-decision-1" => Some(Model::GeminiDecision1),
         "gpt-6-luna" => Some(Model::Gpt6Luna),
         "jev-1.13" | "jev-1.13.0" | "typesafe/jev-1.13" => Some(Model::Jev113),
         "jev-1.14" | "jev-1.14.0" | "typesafe/jev-1.14" => Some(Model::Jev114),
@@ -125,6 +130,7 @@ impl fmt::Display for Model {
             Self::Clef => "clef",
             Self::ClefFlash => "clef-flash",
             Self::ClefOmni => "clef-omni",
+            Self::GeminiDecision1 => "gemini-decision-1",
             Self::Gpt6Luna => "gpt-6-luna",
             Self::Jev113 => "jev-1.13",
             Self::Jev114 => "jev-1.14",
@@ -219,6 +225,60 @@ mod tests {
             assert!(id.parse::<Model>().is_err());
         }
         assert!("a".repeat(129).parse::<Model>().is_err());
+    }
+}
+
+#[cfg(test)]
+mod gemini_tests {
+    use super::*;
+
+    #[test]
+    fn test_should_resolve_gemini_default_and_reject_other_providers() {
+        let model: Model = "gemini-decision-1".parse().unwrap();
+        assert_eq!(model, Model::GeminiDecision1);
+        assert_eq!(model.to_string(), "gemini-decision-1");
+        assert_eq!(
+            serde_json::from_value::<Model>(serde_json::to_value(&model).unwrap()).unwrap(),
+            model
+        );
+        for requested in [Model::Default, Model::GeminiDecision1] {
+            assert_eq!(
+                requested.resolve(Some(Provider::Gemini)).unwrap(),
+                (Model::GeminiDecision1, "gemini-decision-1".to_owned())
+            );
+        }
+        for provider in [
+            Some(Provider::OpenAi),
+            Some(Provider::OpenRouter),
+            Some(Provider::TypeSafe),
+            Some(Provider::Cloudflare),
+            None,
+        ] {
+            assert!(matches!(
+                model.resolve(provider),
+                Err(Error::UnsupportedModel)
+            ));
+        }
+        for foreign in [Model::Gpt6Luna, Model::Jev114, Model::Clef] {
+            assert!(matches!(
+                foreign.resolve(Some(Provider::Gemini)),
+                Err(Error::UnsupportedModel)
+            ));
+        }
+        assert!(
+            Model::Custom(ModelId::try_from("gemini-decision-1").unwrap())
+                .resolve(Some(Provider::Gemini))
+                .is_err()
+        );
+        assert_eq!(
+            "gemini-decision-2-preview"
+                .parse::<Model>()
+                .unwrap()
+                .resolve(Some(Provider::Gemini))
+                .unwrap()
+                .1,
+            "gemini-decision-2-preview"
+        );
     }
 }
 

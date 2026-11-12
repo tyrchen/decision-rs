@@ -8,7 +8,7 @@ use std::{
 
 use reqwest::{
     Client as ReqwestClient, Request, Url,
-    header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue},
+    header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue},
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::{
@@ -80,33 +80,57 @@ impl HttpClient {
         &self.0
     }
 }
+const GOOGLE_API_KEY: HeaderName = HeaderName::from_static("x-goog-api-key");
+
 /// Authentication for an explicitly configured endpoint.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Auth {
-    /// Bearer credential, redacted in Debug.
+    /// API key, redacted in Debug. Sent as `x-goog-api-key` to Gemini endpoints and as
+    /// a Bearer credential to every other protocol.
     ApiKey(SecretString),
     /// Anonymous authentication, only available with a custom endpoint.
     None,
 }
 impl Auth {
-    pub(crate) fn header(&self) -> Result<Option<HeaderValue>, Error> {
+    /// Validate the credential independently of the protocol that will carry it.
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.key().map(drop)
+    }
+    fn key(&self) -> Result<Option<&str>, Error> {
         match self {
             Self::None => Ok(None),
             Self::ApiKey(secret) => {
                 let key = secret.expose_secret();
-                if key.is_empty()
-                    || key.len() > 4096
-                    || key.chars().any(|c| c.is_whitespace() || c.is_control())
+                if key.is_empty() || key.len() > 4096 || !key.bytes().all(|b| b.is_ascii_graphic())
                 {
                     return Err(Error::InvalidConfiguration("API key bounds"));
                 }
-                let mut header = HeaderValue::from_str(&format!("Bearer {key}"))
-                    .map_err(|_| Error::InvalidConfiguration("API key encoding"))?;
-                header.set_sensitive(true);
-                Ok(Some(header))
+                Ok(Some(key))
             }
         }
+    }
+    pub(crate) fn header(
+        &self,
+        backend: Backend,
+    ) -> Result<Option<(HeaderName, HeaderValue)>, Error> {
+        let Some(key) = self.key()? else {
+            return Ok(None);
+        };
+        let (name, value) = match backend {
+            Backend::Gemini => (GOOGLE_API_KEY, HeaderValue::from_str(key)),
+            Backend::OpenAi
+            | Backend::Jev
+            | Backend::SystemOne
+            | Backend::Cloudflare
+            | Backend::ClefSystemOne => (
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {key}")),
+            ),
+        };
+        let mut value = value.map_err(|_| Error::InvalidConfiguration("API key encoding"))?;
+        value.set_sensitive(true);
+        Ok(Some((name, value)))
     }
 }
 /// Complete custom URL paired with an explicit protocol.
@@ -201,6 +225,19 @@ impl Endpoint {
     pub fn openai_decisions(url: &str) -> Result<Self, Error> {
         Self::new(url, Backend::OpenAi)
     }
+    /// Declare a complete Gemini Decisions endpoint; API keys use `x-goog-api-key`.
+    /// # Errors
+    /// Rejects invalid or insecure URLs.
+    ///
+    /// ```no_run
+    /// # fn example() -> Result<(), decision_rs::Error> {
+    /// let endpoint = decision_rs::Endpoint::gemini_decisions("http://127.0.0.1:8080/v1beta/decisions")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn gemini_decisions(url: &str) -> Result<Self, Error> {
+        Self::new(url, Backend::Gemini)
+    }
 }
 #[derive(Debug)]
 pub(crate) struct Transport {
@@ -253,8 +290,8 @@ impl Transport {
             .post(endpoint.url.clone())
             .header(CONTENT_TYPE, "application/json")
             .body(body);
-        if let Some(header) = auth.header()? {
-            builder = builder.header(AUTHORIZATION, header);
+        if let Some((name, value)) = auth.header(endpoint.backend)? {
+            builder = builder.header(name, value);
         }
         builder.build().map_err(Error::Transport)
     }
@@ -369,6 +406,13 @@ impl Transport {
                 retry_after.map(|d| d.as_secs().saturating_add(u64::from(d.subsec_nanos() != 0))),
                 request_id,
             );
+            // Some protocols carry the delay in the error body rather than a header.
+            let retry_after = retry_after.or(match error {
+                Error::RateLimited {
+                    retry_after_secs: Some(secs),
+                } => Some(Duration::from_secs(secs)),
+                _ => None,
+            });
             return Err(AttemptError { error, retry_after });
         }
         Ok((body, request_id))

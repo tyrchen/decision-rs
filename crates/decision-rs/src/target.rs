@@ -27,6 +27,9 @@ impl HostedSelection {
             Provider::TypeSafe => Target::Fixed(Endpoint::system_one(
                 "https://api.typesafe.ai/v1/systemone",
             )?),
+            Provider::Gemini => Target::Fixed(Endpoint::gemini_decisions(
+                "https://generativelanguage.googleapis.com/v1beta/decisions",
+            )?),
         })
     }
 }

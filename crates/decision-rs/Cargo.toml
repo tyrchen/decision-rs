@@ -1,6 +1,6 @@
 [package]
 name = "decision-rs"
-description = "Provider-neutral typed decisions for OpenAI, OpenRouter and TypeSafe."
+description = "Provider-neutral typed decisions for OpenAI, Gemini, OpenRouter, TypeSafe and Cloudflare."
 categories = ["asynchronous", "web-programming::http-client", "api-bindings"]
 keywords = ["classification", "openai", "llm", "decision", "async"]
 version.workspace = true

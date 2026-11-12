@@ -1,6 +1,7 @@
 //! Private protocol compilation and validation against the original schema.
 
 mod cloudflare;
+mod gemini;
 mod jev;
 mod openai;
 
@@ -19,6 +20,7 @@ pub(crate) enum Backend {
     OpenAi,
     Cloudflare,
     ClefSystemOne,
+    Gemini,
 }
 /// The immutable schema is the response plan; boolean predicates are interpreted
 /// only according to the backend and the presence of both criteria.
@@ -27,7 +29,7 @@ pub(crate) struct ResponsePlan<'a> {
 }
 pub(crate) struct Decoded {
     pub answers: Answers,
-    pub model: String,
+    pub model: Option<String>,
     pub id: Option<String>,
     pub usage: Usage,
 }
@@ -41,6 +43,7 @@ impl Backend {
     ) -> Result<Vec<u8>, Error> {
         match self {
             Self::OpenAi => openai::prepare(input, questions, model, limit),
+            Self::Gemini => gemini::prepare(input, questions, model, limit),
             Self::Jev | Self::SystemOne | Self::Cloudflare | Self::ClefSystemOne => {
                 jev::prepare(input, questions, model, limit)
             }
@@ -55,6 +58,7 @@ impl Backend {
             }
             Self::ClefSystemOne => jev::decode(value, plan.questions, NumericPolicy::Clef),
             Self::Cloudflare => cloudflare::decode(value, plan.questions),
+            Self::Gemini => gemini::decode(value, plan.questions),
         }
     }
     pub fn http_error(
@@ -64,47 +68,67 @@ impl Backend {
         retry_after_secs: Option<u64>,
         request_id: Option<String>,
     ) -> Error {
-        let (code, quota) = if matches!(self, Self::Cloudflare) {
-            let codes = cloudflare::error_codes(bytes);
-            let quota = codes.iter().any(|code| code.parse::<u64>() == Ok(3036));
-            (codes.into_iter().next(), quota)
-        } else {
-            let dto = json::parse(bytes, 4096, 256)
-                .ok()
-                .and_then(|v| serde_json::from_value::<ErrorEnvelope>(v).ok());
-            let code = dto
-                .as_ref()
-                .and_then(|d| d.error.code.as_deref())
-                .and_then(|s| bounded_identifier(s, 128).ok());
-            let quota = matches!(self, Self::OpenAi)
-                && dto.as_ref().is_some_and(|d| {
-                    d.error.kind.as_deref() == Some("insufficient_quota")
-                        || matches!(
-                            d.error.code.as_deref(),
-                            Some(
-                                "insufficient_quota"
-                                    | "credit_balance_exhausted"
-                                    | "organization_spend_limit_exceeded"
-                                    | "project_spend_limit_exceeded"
-                                    | "organization_usage_limit_exceeded"
-                            )
-                        )
-                });
-            (code, quota)
+        let summary = match self {
+            Self::Cloudflare => cloudflare::error_summary(bytes),
+            Self::Gemini => gemini::error_summary(bytes),
+            Self::OpenAi | Self::Jev | Self::SystemOne | Self::ClefSystemOne => {
+                standard_error_summary(self, bytes)
+            }
         };
         match status {
             401 => Error::Authentication,
+            400 if summary.invalid_key => Error::Authentication,
             403 => Error::PermissionDenied,
             402 => Error::QuotaExceeded,
-            429 if quota => Error::QuotaExceeded,
-            429 => Error::RateLimited { retry_after_secs },
+            429 if summary.quota => Error::QuotaExceeded,
+            429 => Error::RateLimited {
+                retry_after_secs: retry_after_secs.or(summary.retry_after_secs),
+            },
+            400 if summary.blocked => Error::InvalidInput("upstream content filter blocked input"),
             400 | 413 | 422 => Error::InvalidInput("upstream rejected request"),
             _ => Error::Api {
                 status,
-                code,
+                code: summary.code,
                 request_id,
             },
         }
+    }
+}
+/// Protocol-specific facts extracted from a bounded error body; never remote prose.
+#[derive(Debug, Default)]
+pub(super) struct ErrorSummary {
+    pub code: Option<String>,
+    pub quota: bool,
+    pub invalid_key: bool,
+    pub blocked: bool,
+    pub retry_after_secs: Option<u64>,
+}
+fn standard_error_summary(backend: Backend, bytes: &[u8]) -> ErrorSummary {
+    let dto = json::parse(bytes, 4096, 256)
+        .ok()
+        .and_then(|v| serde_json::from_value::<ErrorEnvelope>(v).ok());
+    let code = dto
+        .as_ref()
+        .and_then(|d| d.error.code.as_deref())
+        .and_then(|s| bounded_identifier(s, 128).ok());
+    let quota = matches!(backend, Backend::OpenAi)
+        && dto.as_ref().is_some_and(|d| {
+            d.error.kind.as_deref() == Some("insufficient_quota")
+                || matches!(
+                    d.error.code.as_deref(),
+                    Some(
+                        "insufficient_quota"
+                            | "credit_balance_exhausted"
+                            | "organization_spend_limit_exceeded"
+                            | "project_spend_limit_exceeded"
+                            | "organization_usage_limit_exceeded"
+                    )
+                )
+        });
+    ErrorSummary {
+        code,
+        quota,
+        ..ErrorSummary::default()
     }
 }
 #[derive(Deserialize)]
@@ -178,15 +202,25 @@ impl WireUsage {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum NumericPolicy {
     Standard,
+    /// Reference implementation rounds every value to four decimals.
     Clef,
+    /// Documented responses round values to as few as two decimals.
+    Gemini,
 }
 impl NumericPolicy {
+    /// Half of the last reported decimal place when each value is rounded independently.
+    fn half_unit(self) -> Option<f64> {
+        match self {
+            Self::Standard => None,
+            Self::Clef => Some(0.00005),
+            Self::Gemini => Some(0.005),
+        }
+    }
     fn mass_tolerance(self, count: usize) -> Result<f64, Error> {
         let count = u32::try_from(count).map_err(|_| Error::protocol("option count"))?;
-        Ok(match self {
-            Self::Standard => 0.001,
-            Self::Clef => f64::from(count) * 0.00005 + 1e-9,
-        })
+        Ok(self
+            .half_unit()
+            .map_or(0.001, |half| f64::from(count) * half + 1e-9))
     }
 }
 pub(super) fn distribution(
@@ -265,12 +299,12 @@ pub(super) fn score(
             .enumerate()
             .map(|(i, p)| i as f64 * p.get())
             .sum::<f64>();
-        let (mean, tolerance) = match policy {
-            NumericPolicy::Standard => (
+        let (mean, tolerance) = match policy.half_unit() {
+            None => (
                 mean / probs.values().map(|p| p.get()).sum::<f64>(),
                 0.001 * max.max(1.0),
             ),
-            NumericPolicy::Clef => (mean, 0.00005 * (1.0 + max * (max + 1.0) / 2.0) + 1e-9),
+            Some(half) => (mean, half * (1.0 + max * (max + 1.0) / 2.0) + 1e-9),
         };
         if (mean - raw).abs() > tolerance {
             return Err(Error::for_question(

@@ -1,6 +1,6 @@
 # Quickstart
 
-Add `decision-rs = "0.5.1"` and Tokio with `macros` and
+Add `decision-rs = "0.6.0"` and Tokio with `macros` and
 `rt-multi-thread`. Rust 1.99 and edition 2024 are required. Default features include
 derives, bounded retry and rustls with aws-lc-rs.
 
@@ -23,12 +23,13 @@ async fn review(key: String) -> Result<(), decision_rs::Error> {
 ```
 
 Replace only the constructor with `Client::openrouter` or `Client::typesafe` to use
-Jev. `Client::new(provider, key)` supports runtime selection for those providers;
+Jev, or `Client::gemini` to use Gemini Decisions. `Client::new(provider, key)`
+supports runtime selection for those providers;
 Cloudflare additionally needs an account (see below). Known incompatible
 model/provider combinations fail before sending; custom IDs are sent unchanged
 except on Cloudflare, which accepts only the three known Clef models.
-`Model::Default` resolves to Luna for OpenAI, Jev114 for either Jev provider, and
-Clef for Cloudflare.
+`Model::Default` resolves to Luna for OpenAI, `GeminiDecision1` for Gemini, Jev114
+for either Jev provider, and Clef for Cloudflare.
 
 Jev providers default to the pinned `Model::Jev114`: `typesafe/jev-1.14` on
 OpenRouter and `jev-1.14.0` on TypeSafe. These IDs follow the
@@ -107,12 +108,61 @@ Opt-in live smoke tests require the selected credential and may incur charges:
 cargo test --test live --all-features test_should_accept_hosted_protocol::case_1 -- --ignored --exact # OpenAI
 cargo test --test live --all-features test_should_accept_hosted_protocol::case_2 -- --ignored --exact # OpenRouter
 cargo test --test live --all-features test_should_accept_hosted_protocol::case_3 -- --ignored --exact # TypeSafe
+make test-live-gemini # Gemini Decisions; GEMINI_API_KEY required
 make test-live-jev # Pinned 1.14 and rolling alias on both Jev providers
 make test-live-cloudflare # All three Clef models; token and account required
 ```
 
 See [primitives](primitives.md), [thresholds](thresholds.md), [cases](cases.md),
 and [migration](migration-v0.4.md).
+
+## Gemini Decisions
+
+Use a Gemini API key from Google AI Studio. The SDK targets
+`POST https://generativelanguage.googleapis.com/v1beta/decisions` with
+`gemini-decision-1` and sends the key as `x-goog-api-key` (never as a Bearer token,
+which Google reserves for OAuth):
+
+```rust,no_run
+# async fn run(key: String) -> Result<(), decision_rs::Error> {
+use decision_rs::{Client, Decision, Predicate, Probability};
+
+#[derive(Debug, Decision)]
+struct Return {
+    /// Is the customer reporting a product defect?
+    #[decision(yes = "The product itself is broken or faulty.",
+          no = "Preference, sizing, shipping, or pricing complaint.")]
+    defect: Predicate,
+}
+
+let client = Client::gemini(key)?;
+let answer: Return = client.decide("The mug arrived cracked.").await?;
+// Gemini reports yes/no probabilities inside 0.01..=0.99; gate inside that range.
+let accepted = answer.defect.is_yes(Probability::try_from(0.9)?);
+# Ok(())
+# }
+```
+
+Set `DECISION_PROVIDER=gemini` with `GEMINI_API_KEY` (or `DECISION_API_KEY`) for
+environment construction, or `provider: gemini` in YAML. `Endpoint::gemini_decisions(url)`
+targets a proxy or gateway that speaks the same protocol.
+
+Behavior specific to Gemini:
+
+- Input is the SDK's text or canonical JSON. Image, audio, video and PDF blocks are
+  supported by the model but not exposed by this SDK.
+- The response carries no model name or response ID: `returned_model` and
+  `response_id` are `None`. Output tokens are always 0, and cost is never reported.
+- Input blocked by Google's content filters returns
+  `Error::InvalidInput("upstream content filter blocked input")`. An invalid key,
+  which Google reports as HTTP 400, maps to `Error::Authentication`. Daily quota
+  exhaustion maps to `QuotaExceeded`. Other 429 responses are retried after the
+  server's `RetryInfo` delay, within the request deadline.
+- Documented responses round probabilities to as few as two decimals. The codec
+  tolerates that rounding but still rejects missing, unknown or clearly
+  unnormalized entries.
+
+See the [research record](research/gemini-decisions.md) for sources and evidence limits.
 
 ## Cloudflare-hosted Clef
 

@@ -1,13 +1,13 @@
 # decision-rs
 
-Typed decisions for OpenAI Decisions, OpenRouter Jev, TypeSafe System One and
-Cloudflare Workers AI Clef.
+Typed decisions for OpenAI Decisions, Google Gemini Decisions, OpenRouter Jev,
+TypeSafe System One and Cloudflare Workers AI Clef.
 Declare questions once and select a provider when constructing the client. The
 same business types, acceptance methods and error categories work on every backend.
 
 ```toml
 [dependencies]
-decision-rs = "0.5.1"
+decision-rs = "0.6.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -37,7 +37,8 @@ enum Team {
 
 async fn triage(key: String) -> Result<(), decision_rs::Error> {
     let client = Client::openai(key)?;
-    // Client::openrouter(key)? and Client::typesafe(key)? use the same schema.
+    // Client::gemini(key)?, Client::openrouter(key)? and Client::typesafe(key)?
+    // use the same schema.
     let answer: Triage = client.decide("The screen arrived broken.").await?;
     let gate = Probability::try_from(0.9)?;
     if answer.defect.is_yes(gate) {
@@ -66,8 +67,8 @@ Model calibration can differ, so evaluate thresholds for each model.
 backend. Runtime schemas use `Questions::builder`; `Client::ask` returns checked,
 declaration-ordered answers and metadata. No provider wire types enter business code.
 
-Set `DECISION_PROVIDER=openai|openrouter|typesafe|cloudflare` and either `DECISION_API_KEY` or the matching
-`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `TYPESAFE_API_KEY`, or `CLOUDFLARE_API_TOKEN`.
+Set `DECISION_PROVIDER=openai|gemini|openrouter|typesafe|cloudflare` and either `DECISION_API_KEY` or the matching
+`OPENAI_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `TYPESAFE_API_KEY`, or `CLOUDFLARE_API_TOKEN`.
 Cloudflare also requires `CLOUDFLARE_ACCOUNT_ID`. With no provider, exactly
 one provider-specific key is required. Multiple keys or an unassigned generic key
 produce an ambiguity error. `DECISION_MODEL` optionally overrides the provider-aware default.
@@ -75,6 +76,7 @@ produce an ambiguity error. `DECISION_MODEL` optionally overrides the provider-a
 | Provider | Default model |
 |---|---|
 | OpenAI | `gpt-6-luna` |
+| Gemini | `gemini-decision-1` |
 | OpenRouter | `typesafe/jev-1.14` |
 | TypeSafe | `jev-1.14.0` |
 | Cloudflare | `clef` |
@@ -89,6 +91,11 @@ Select `Model::ClefFlash` or `Model::ClefOmni` explicitly; the SDK supports text
 canonical JSON for all three. Model overrides change both URL and body atomically.
 Cloudflare can truncate long state to its token window: SDK byte limits do not
 ensure complete evidence. Evaluate each model's thresholds independently.
+
+For Gemini, `Client::gemini(key)?` sends the key as `x-goog-api-key` to the v1beta
+Decisions endpoint. The SDK sends text and canonical JSON; media input is not exposed.
+Gemini reports no model name, so `ResponseMeta::returned_model` is `None` there and
+`Some` on every other provider.
 
 Clients freeze provider, model and credentials together. `Client::builder` accepts
 validated runtime settings and an SDK-controlled `HttpClient` pool that can be
@@ -112,9 +119,9 @@ ambiguous failures after sending. Evidence, schemas, bodies and concurrency are 
 [0.4 migration](docs/migration-v0.4.md) · [Design](specs/unified-decision-backends-design.md)
 
 Run `make build`, `make test`, `make lint`, `make feature-check`, `make audit`, and
-`make publish-check` for the release gates. `make test-live` requires all four
+`make publish-check` for the release gates. `make test-live` requires all five
 provider credentials plus the Cloudflare account and can incur API charges; individual provider filters are
 shown in the quickstart. `make test-live-jev` checks pinned 1.14 and the rolling alias;
-`make test-live-cloudflare` runs only the three Clef models.
+`make test-live-cloudflare` runs only the three Clef models; `make test-live-gemini` runs Gemini.
 The nine examples cover typed/dynamic questions, thresholds,
 sampling, batches, custom endpoints and case files.

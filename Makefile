@@ -18,6 +18,9 @@ test-live-jev:
 test-live-cloudflare:
 	@cargo test -p decision-rs --all-features --test live test_should_accept_cloudflare_clef_protocol -- --ignored
 
+test-live-gemini:
+	@cargo test -p decision-rs --all-features --test live test_should_accept_hosted_protocol::case_4 -- --ignored --exact
+
 test-live:
 	@cargo nextest run --all-features -- --ignored
 
@@ -58,4 +61,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test test-no-retry test-concurrency test-live test-live-jev test-live-cloudflare docs lint lint-boundaries feature-check audit secret-check publish-check publish release update-submodule
+.PHONY: build test test-no-retry test-concurrency test-live test-live-jev test-live-cloudflare test-live-gemini docs lint lint-boundaries feature-check audit secret-check publish-check publish release update-submodule

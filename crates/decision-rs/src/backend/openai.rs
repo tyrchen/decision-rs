@@ -190,7 +190,7 @@ pub(super) fn decode(value: Value, questions: &Questions) -> Result<Decoded, Err
     }
     Ok(Decoded {
         answers: Answers(answers),
-        model: bounded_identifier(&response.model, 256)?,
+        model: Some(bounded_identifier(&response.model, 256)?),
         id: response
             .id
             .as_deref()

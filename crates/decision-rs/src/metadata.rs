@@ -37,8 +37,8 @@ pub struct ResponseMeta {
     pub wire_model: String,
     /// Separate URL model identifier for model-routed providers; never an account URL.
     pub routing_model: Option<String>,
-    /// Model string returned by the server.
-    pub returned_model: String,
+    /// Model string returned by the server; None when the protocol reports none (Gemini).
+    pub returned_model: Option<String>,
     /// Server request header identifier.
     pub request_id: Option<String>,
     /// Separate response body identifier.

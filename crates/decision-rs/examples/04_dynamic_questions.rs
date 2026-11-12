@@ -29,6 +29,6 @@ async fn main() -> Result<()> {
     let response = Client::from_env()?
         .ask("Payment failed and I was charged twice.", &questions)
         .await?;
-    tracing::info!(answers = ?response.answers, model = %response.meta.returned_model, "dynamic decision");
+    tracing::info!(answers = ?response.answers, model = ?response.meta.returned_model, "dynamic decision");
     Ok(())
 }

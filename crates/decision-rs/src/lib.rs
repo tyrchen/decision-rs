@@ -1,4 +1,4 @@
-//! Typed decisions across `OpenAI`, `OpenRouter`, `TypeSafe` and Cloudflare Clef.
+//! Typed decisions across `OpenAI`, Gemini, `OpenRouter`, `TypeSafe` and Cloudflare Clef.
 //!
 //! Declare a schema once, then select the backend when constructing the client.
 //! Public answers are validated against the same schema on every backend.

@@ -19,6 +19,8 @@ pub enum Provider {
     OpenRouter,
     /// `TypeSafe` AI System One.
     TypeSafe,
+    /// Google Gemini Decisions API.
+    Gemini,
 }
 impl Provider {
     pub(crate) fn key_env(self) -> &'static str {
@@ -27,6 +29,7 @@ impl Provider {
             Self::Cloudflare => "CLOUDFLARE_API_TOKEN",
             Self::OpenRouter => "OPENROUTER_API_KEY",
             Self::TypeSafe => "TYPESAFE_API_KEY",
+            Self::Gemini => "GEMINI_API_KEY",
         }
     }
 }
@@ -37,6 +40,7 @@ impl fmt::Display for Provider {
             Self::Cloudflare => "cloudflare",
             Self::OpenRouter => "openrouter",
             Self::TypeSafe => "typesafe",
+            Self::Gemini => "gemini",
         })
     }
 }
@@ -48,6 +52,7 @@ impl FromStr for Provider {
             "cloudflare" => Ok(Self::Cloudflare),
             "openrouter" => Ok(Self::OpenRouter),
             "typesafe" => Ok(Self::TypeSafe),
+            "gemini" => Ok(Self::Gemini),
             _ => Err(Error::InvalidConfiguration("unknown provider")),
         }
     }

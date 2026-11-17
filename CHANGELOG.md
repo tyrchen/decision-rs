@@ -3,11 +3,19 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
-## [unreleased]
+## [decision-rs-v0.7.0](https://github.com/tyrchen/decision-rs/compare/decision-rs-v0.6.0..decision-rs-v0.7.0) - 2026-11-17
+
+### Features
+
+- add image evidence for OpenAI and Gemini and bump to 0.7.0 - ([9477ce8](https://github.com/tyrchen/decision-rs/commit/9477ce87829da1166923362ddf40bf27f239c133)) - Tyr Chen
 
 ### Other
 
 - Update CHANGELOG.md - ([515fd47](https://github.com/tyrchen/decision-rs/commit/515fd479717dfb56eb77152ab513751ca1b54377)) - Tyr Chen
+- Update CHANGELOG.md - ([6bae352](https://github.com/tyrchen/decision-rs/commit/6bae3529a7a9eb82980be5b0ac705cfbe9a14656)) - Tyr Chen
+- Merge pull request #6 from tyrchen/feat/image-evidence
+
+feat: add image evidence for OpenAI and Gemini and bump to 0.7.0 - ([2c37aeb](https://github.com/tyrchen/decision-rs/commit/2c37aeb7a771c7f42ced5ecbf109d7e81d6781f9)) - Tyr Chen
 
 ---
 ## [decision-rs-v0.6.0](https://github.com/tyrchen/decision-rs/compare/decision-rs-v0.5.1..decision-rs-v0.6.0) - 2026-11-12

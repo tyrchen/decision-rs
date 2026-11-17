@@ -7,9 +7,9 @@ use std::{
 };
 
 use decision_rs::{
-    Auth, Choice, ChoiceOptions, Client, Decision, Endpoint, Error, HttpClient, Input, Model,
-    Outcome, Predicate, Probability, Provider, Questions, RequestOptions, RetryConfig, Score,
-    ScoreLevels, Settings, Verdict,
+    Auth, Choice, ChoiceOptions, Client, Decision, Endpoint, Error, HttpClient, Image, Input,
+    Model, Outcome, Predicate, Probability, Provider, Questions, RequestOptions, RetryConfig,
+    Score, ScoreLevels, Settings, Verdict,
 };
 use rstest::rstest;
 use serde_json::{Value, json};
@@ -745,6 +745,34 @@ async fn test_should_keep_batch_order_and_per_item_errors() {
         .unwrap();
     assert!(results.is_empty());
 }
+#[cfg(feature = "batch")]
+#[tokio::test]
+async fn test_should_retain_per_call_metadata_in_batches() {
+    let server = MockServer::start().await;
+    mount(&server, triage_body(true)).await;
+    let client = client(&server, true, settings());
+    let inputs = [
+        Input::try_from("first").unwrap(),
+        Input::try_from("second").unwrap(),
+    ];
+    let results = decision_rs::decide_all_with::<Triage>(&client, &inputs, 2)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    for result in results {
+        let decided = result.unwrap();
+        assert_eq!(decided.meta.usage.input_tokens, 12);
+        assert_eq!(
+            decided.meta.returned_model.as_deref(),
+            Some("returned-model")
+        );
+    }
+    assert!(
+        decision_rs::decide_all_with::<Triage>(&client, &inputs, 0)
+            .await
+            .is_err()
+    );
+}
 
 #[cfg(feature = "retry")]
 #[tokio::test]
@@ -949,4 +977,177 @@ async fn test_should_use_google_api_key_header_for_custom_gemini_endpoints() {
     assert_eq!(response.meta.usage.total_tokens, 5);
     let requests = server.received_requests().await.unwrap();
     assert!(requests[0].headers.get("authorization").is_none());
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ChoiceOptions)]
+enum Composition {
+    /// Balanced and readable.
+    Full,
+    /// Mostly empty.
+    Sparse,
+    /// Too many elements.
+    Crowded,
+}
+#[derive(Debug, Decision)]
+struct FrameReview {
+    /// Does the frame show the narrated line?
+    shows_line: Predicate,
+    /// How full is the frame?
+    composition: Choice<Composition>,
+}
+fn frame_input() -> Input {
+    Input::try_from("Narration: revenue doubled.")
+        .unwrap()
+        .with_image(Image::try_from(&b"\x89PNG\r\n\x1a\nframe-a"[..]).unwrap())
+        .unwrap()
+}
+fn endpoint_client(endpoint: Endpoint, s: Settings) -> Client {
+    Client::for_endpoint_with(
+        endpoint,
+        Auth::ApiKey("fixture-key".into()),
+        "fixture-model".parse().unwrap(),
+        HttpClient::new().unwrap(),
+        s,
+    )
+    .unwrap()
+}
+#[tokio::test]
+async fn test_should_send_openai_image_evidence_and_report_usage() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_json(json!({"model":"fixture-model","input":[{"role":"user","content":[
+            {"type":"input_text","text":"Narration: revenue doubled."},
+            {"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgpmcmFtZS1h"}
+        ]}],"questions":[
+            {"name":"shows_line","type":"predicate","instructions":"Does the frame show the narrated line?"},
+            {"name":"composition","type":"choice","instructions":"How full is the frame?","choices":[
+                {"value":"full","description":"Balanced and readable."},
+                {"value":"sparse","description":"Mostly empty."},
+                {"value":"crowded","description":"Too many elements."}]}
+        ]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model":"gpt-6-luna-2026-10-06",
+            "answers":[
+                {"name":"shows_line","type":"predicate","probability":0.92},
+                {"name":"composition","type":"choice","choice":"sparse","confidence":0.7,"probabilities":[
+                    {"value":"full","probability":0.2},{"value":"sparse","probability":0.7},{"value":"crowded","probability":0.1}]}
+            ],
+            "usage":{"input_tokens":812,"input_tokens_details":{"cached_tokens":256,"cache_write_tokens":0},
+                "output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":812}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = endpoint_client(
+        Endpoint::openai_decisions(&format!("{}/decisions", server.uri())).unwrap(),
+        settings(),
+    );
+    let review = client
+        .decide_with::<FrameReview>(RequestOptions::new(frame_input()).unwrap())
+        .await
+        .unwrap();
+    assert!(review.value.shows_line.is_yes(p(0.9)));
+    assert_eq!(review.value.composition.value(), &Composition::Sparse);
+    assert_eq!(review.meta.usage.input_tokens, 812);
+    assert_eq!(review.meta.usage.output_tokens, 0);
+    assert_eq!(review.meta.usage.cached_tokens, Some(256));
+    assert_eq!(review.meta.wire_model, "fixture-model");
+    assert_eq!(
+        review.meta.returned_model.as_deref(),
+        Some("gpt-6-luna-2026-10-06")
+    );
+}
+#[tokio::test]
+async fn test_should_send_gemini_image_evidence_and_report_usage() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("x-goog-api-key", "fixture-key"))
+        .and(body_partial_json(json!({"model":"fixture-model","input":[
+            {"type":"text","text":"Narration: revenue doubled."},
+            {"type":"image","data":"iVBORw0KGgpmcmFtZS1h","mime_type":"image/png"}
+        ]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "answers":{
+                "shows_line":{"type":"noul","noul":0.88,"confidence":0.88},
+                "composition":{"type":"choice","choice":"full","probabilities":{"full":0.8,"sparse":0.15,"crowded":0.05},"confidence":0.8}
+            },
+            "usage":{"total_input_tokens":1290,"total_cached_tokens":0,
+                "input_tokens_by_modality":[{"modality":"text","tokens":32},{"modality":"image","tokens":1258}],
+                "total_output_tokens":0,"total_tokens":1290}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = endpoint_client(
+        Endpoint::gemini_decisions(&format!("{}/v1beta/decisions", server.uri())).unwrap(),
+        settings(),
+    );
+    let review = client
+        .decide_with::<FrameReview>(RequestOptions::new(frame_input()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(review.value.composition.value(), &Composition::Full);
+    assert_eq!(review.meta.usage.input_tokens, 1290);
+    assert_eq!(review.meta.usage.cached_tokens, Some(0));
+    assert_eq!(review.meta.returned_model, None);
+    assert_eq!(review.meta.wire_model, "fixture-model");
+}
+#[rstest]
+#[case("system_one")]
+#[case("clef_system_one")]
+#[case("jev_decisions")]
+#[tokio::test]
+async fn test_should_refuse_images_on_text_only_endpoints_without_network(#[case] protocol: &str) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let endpoint = match protocol {
+        "system_one" => Endpoint::system_one(&format!("{}/v1/systemone", server.uri())),
+        "clef_system_one" => Endpoint::clef_system_one(&format!("{}/v1/systemone", server.uri())),
+        _ => Endpoint::jev_decisions(&format!("{}/decisions", server.uri())),
+    }
+    .unwrap();
+    let result = endpoint_client(endpoint, settings())
+        .decide::<FrameReview>(frame_input())
+        .await;
+    assert!(matches!(
+        result,
+        Err(Error::ImagesUnsupported { provider: None })
+    ));
+}
+#[rstest]
+#[case(Provider::OpenRouter)]
+#[case(Provider::TypeSafe)]
+#[tokio::test]
+async fn test_should_refuse_images_on_hosted_text_only_providers(#[case] provider: Provider) {
+    // The check precedes transport, so the hosted URL is never contacted.
+    let client = Client::new(provider, "fixture-key").unwrap();
+    let schema = FrameReview::questions().unwrap();
+    assert!(!provider.accepts_images());
+    assert!(matches!(
+        client.ask(frame_input(), schema).await,
+        Err(Error::ImagesUnsupported { provider: Some(p) }) if p == provider
+    ));
+}
+#[tokio::test]
+async fn test_should_enforce_configured_image_limit_before_network() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let mut s = settings();
+    s.limits.image_bytes = 8;
+    let client = endpoint_client(
+        Endpoint::openai_decisions(&format!("{}/decisions", server.uri())).unwrap(),
+        s,
+    );
+    assert!(matches!(
+        client.decide::<FrameReview>(frame_input()).await,
+        Err(Error::InvalidInput("configured image limit"))
+    ));
 }

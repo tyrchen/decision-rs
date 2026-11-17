@@ -33,6 +33,7 @@ batch = ["dep:futures-util"]
 yaml = ["dep:serde-saphyr"]
 
 [dependencies]
+base64.workspace = true
 futures-util = { workspace = true, optional = true }
 httpdate.workspace = true
 indexmap.workspace = true
@@ -42,6 +43,7 @@ secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde-saphyr = { workspace = true, optional = true }
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "time", "sync"] }
 tracing.workspace = true
@@ -94,6 +96,10 @@ required-features = ["derive"]
 [[example]]
 name = "09_cases_from_file"
 required-features = ["batch", "yaml"]
+
+[[example]]
+name = "10_image_evidence"
+required-features = ["derive"]
 
 [[test]]
 name = "derive"

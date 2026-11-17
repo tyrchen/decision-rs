@@ -23,6 +23,18 @@ pub enum Provider {
     Gemini,
 }
 impl Provider {
+    /// Whether this provider's protocol accepts image evidence.
+    ///
+    /// ```
+    /// use decision_rs::Provider;
+    /// assert!(Provider::OpenAi.accepts_images());
+    /// assert!(Provider::Gemini.accepts_images());
+    /// assert!(!Provider::Cloudflare.accepts_images());
+    /// ```
+    #[must_use]
+    pub const fn accepts_images(self) -> bool {
+        matches!(self, Self::OpenAi | Self::Gemini)
+    }
     pub(crate) fn key_env(self) -> &'static str {
         match self {
             Self::OpenAi => "OPENAI_API_KEY",

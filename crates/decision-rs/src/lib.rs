@@ -23,7 +23,9 @@
 //! ```
 //!
 //! `Input::json` turns structured evidence into canonical compact JSON text for
-//! every backend. `Outcome` preserves explicit refusals; ordinary required fields
+//! every backend. `Input::with_image` attaches PNG, JPEG or `WebP` evidence for the
+//! `OpenAI` and Gemini protocols; other protocols fail with `Error::ImagesUnsupported`
+//! before any network call. `Outcome` preserves explicit refusals; ordinary required fields
 //! return `Error::Refused` with accounting. Missing answers are protocol errors.
 //!
 //! Probability and native confidence are distinct. `Choice::accept` uses the
@@ -46,6 +48,7 @@ mod cases;
 mod client;
 mod config;
 mod error;
+mod image;
 mod input;
 mod json;
 mod metadata;
@@ -61,13 +64,16 @@ mod yaml;
 pub use account::CloudflareAccountId;
 pub use answer::{Answer, Answers, ChoiceAnswer, Distribution, ScoreAnswer};
 #[cfg(feature = "batch")]
-pub use batch::{decide_all, run_cases};
+pub use batch::{decide_all, decide_all_with, run_cases};
 pub use cases::{Case, CaseResult, CaseSet};
 pub use client::{Client, ClientBuilder, Decided, RequestOptions};
 pub use config::{Config, Limits, RetryConfig, Settings, Thresholds};
 #[cfg(feature = "derive")]
 pub use decision_macros::{ChoiceOptions, Decision, ScoreLevels};
 pub use error::{DecodeError, Error, SchemaError};
+pub use image::{
+    Digest, Image, ImageDetail, ImageMediaType, MAX_IMAGE_BYTES, MAX_IMAGES, MAX_TOTAL_IMAGE_BYTES,
+};
 pub use input::{Input, IntoInput};
 pub use metadata::{DecisionResponse, ResponseMeta, Usage};
 pub use model::{Model, ModelId};

@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::{Decoded, ErrorSummary, NumericPolicy, bounded_identifier, jev};
+use super::{Base64, Decoded, ErrorSummary, NumericPolicy, bounded_identifier, jev};
 use crate::{Error, Input, Questions, Usage as DomainUsage, json};
 
 const MAX_DETAILS: usize = 32;
@@ -24,8 +24,46 @@ const BLOCK_CODES: [&str; 5] = [
 #[derive(Serialize)]
 struct Request<'a> {
     model: &'a str,
-    input: &'a str,
+    input: RequestInput<'a>,
     questions: IndexMap<&'a str, jev::Question<'a, Criteria<'a>>>,
+}
+/// Text-only evidence stays a string; images require a list of content blocks.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum RequestInput<'a> {
+    Text(&'a str),
+    Blocks(Vec<Block<'a>>),
+}
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Block<'a> {
+    Text {
+        text: &'a str,
+    },
+    Image {
+        data: Base64<'a>,
+        mime_type: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resolution: Option<&'static str>,
+    },
+}
+impl<'a> RequestInput<'a> {
+    fn new(input: &'a Input) -> Self {
+        if input.images().is_empty() {
+            return Self::Text(input.as_str());
+        }
+        Self::Blocks(
+            std::iter::once(Block::Text {
+                text: input.as_str(),
+            })
+            .chain(input.images().iter().map(|image| Block::Image {
+                data: Base64(image),
+                mime_type: image.media_type().as_str(),
+                resolution: image.detail().wire(),
+            }))
+            .collect(),
+        )
+    }
 }
 #[derive(Serialize)]
 struct Criteria<'a> {
@@ -41,7 +79,7 @@ pub(super) fn prepare(
     json::encode(
         &Request {
             model,
-            input: input.as_str(),
+            input: RequestInput::new(input),
             questions: jev::questions(schema, |yes, no| Criteria {
                 true_description: yes,
                 false_description: no,
@@ -307,6 +345,43 @@ mod tests {
             prepare(&input, &schema, "gemini-decision-1", 64),
             Err(Error::InvalidInput("request body limit"))
         ));
+    }
+    #[test]
+    fn test_should_encode_images_as_content_blocks() {
+        let schema = Questions::builder()
+            .choice(
+                "composition",
+                "How full is the frame?",
+                [
+                    ("full", "Balanced."),
+                    ("sparse", "Mostly empty."),
+                    ("crowded", "Overfull."),
+                ],
+            )
+            .build()
+            .unwrap();
+        let input = Input::try_from("Intended picture: a rising bar chart.")
+            .unwrap()
+            .with_images([
+                crate::Image::try_from(&b"\x89PNG\r\n\x1a\nframe-a"[..])
+                    .unwrap()
+                    .with_detail(crate::ImageDetail::High),
+                crate::Image::try_from(&b"\xff\xd8\xff\xe0frame-b"[..]).unwrap(),
+            ])
+            .unwrap();
+        let body = prepare(&input, &schema, "gemini-decision-1", 1 << 20).unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value,
+            json!({"model":"gemini-decision-1","input":[
+                {"type":"text","text":"Intended picture: a rising bar chart."},
+                {"type":"image","data":"iVBORw0KGgpmcmFtZS1h","mime_type":"image/png","resolution":"high"},
+                {"type":"image","data":"/9j/4GZyYW1lLWI=","mime_type":"image/jpeg"}
+            ],"questions":{
+                "composition":{"type":"choice","instructions":"How full is the frame?",
+                    "criteria":{"full":"Balanced.","sparse":"Mostly empty.","crowded":"Overfull."}}
+            }})
+        );
     }
     #[test]
     fn test_should_decode_documented_multi_question_response() {

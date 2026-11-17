@@ -567,8 +567,12 @@ impl Client {
         options: RequestOptions,
         questions: &Questions,
     ) -> Result<DecisionResponse, Error> {
-        if options.input.as_str().len() > self.inner.transport.settings.limits.input_bytes {
+        let limits = &self.inner.transport.settings.limits;
+        if options.input.as_str().len() > limits.input_bytes {
             return Err(Error::InvalidInput("configured evidence limit"));
+        }
+        if options.input.image_bytes() > limits.image_bytes {
+            return Err(Error::InvalidInput("configured image limit"));
         }
         let requested = options
             .model
@@ -585,6 +589,11 @@ impl Client {
         questions: &Questions,
     ) -> Result<DecisionResponse, Error> {
         let backend = call.endpoint.backend;
+        if !input.images().is_empty() && !backend.accepts_images() {
+            return Err(Error::ImagesUnsupported {
+                provider: self.inner.provider,
+            });
+        }
         let plan = ResponsePlan { questions };
         let body = backend.prepare(
             input,

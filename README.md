@@ -7,7 +7,7 @@ same business types, acceptance methods and error categories work on every backe
 
 ```toml
 [dependencies]
-decision-rs = "0.6.0"
+decision-rs = "0.7.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -64,7 +64,10 @@ remain unavailable; weighted sampling returns `StatisticsUnavailable` when neede
 Model calibration can differ, so evaluate thresholds for each model.
 
 `Input::json(&object)` serializes canonical compact JSON text identically for every
-backend. Runtime schemas use `Questions::builder`; `Client::ask` returns checked,
+backend. `Input::with_image(Image::try_from(bytes)?)` attaches PNG, JPEG or WebP
+evidence (type sniffed from the bytes, at most 16 images and 16 MiB) for OpenAI and
+Gemini; other providers return `Error::ImagesUnsupported` before sending.
+`Input::digest()` covers text and images for cache keys. Runtime schemas use `Questions::builder`; `Client::ask` returns checked,
 declaration-ordered answers and metadata. No provider wire types enter business code.
 
 Set `DECISION_PROVIDER=openai|gemini|openrouter|typesafe|cloudflare` and either `DECISION_API_KEY` or the matching
@@ -93,7 +96,8 @@ Cloudflare can truncate long state to its token window: SDK byte limits do not
 ensure complete evidence. Evaluate each model's thresholds independently.
 
 For Gemini, `Client::gemini(key)?` sends the key as `x-goog-api-key` to the v1beta
-Decisions endpoint. The SDK sends text and canonical JSON; media input is not exposed.
+Decisions endpoint. The SDK sends text, canonical JSON and images; audio, video and
+PDF input are not exposed.
 Gemini reports no model name, so `ResponseMeta::returned_model` is `None` there and
 `Some` on every other provider.
 

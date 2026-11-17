@@ -1,8 +1,8 @@
 //! Opt-in hosted protocol smoke tests. Credentials select a provider explicitly.
 
 use decision_rs::{
-    Answer, Choice, ChoiceOptions, Client, Decision, Distribution, Input, Model, Outcome,
-    Predicate, Provider, RequestOptions, Score, ScoreLevels,
+    Answer, Choice, ChoiceOptions, Client, Decision, Distribution, Image, ImageDetail, Input,
+    Model, Outcome, Predicate, Provider, RequestOptions, Score, ScoreLevels,
 };
 use rstest::rstest;
 
@@ -94,6 +94,51 @@ async fn check_hosted_model(provider: Provider, key_name: &str, model: Model) {
     assert!(matches!(result.value.refund, Outcome::Answered(_)));
     assert!(matches!(result.value.team, Outcome::Answered(_)));
     assert!(matches!(result.value.urgency, Outcome::Answered(_)));
+}
+
+#[derive(Debug, ChoiceOptions)]
+enum Hue {
+    /// The frame is mostly red.
+    Red,
+    /// The frame is mostly green.
+    Green,
+    /// The frame is mostly blue.
+    Blue,
+}
+#[derive(Debug, Decision)]
+struct FrameCheck {
+    /// Is the attached frame a single flat color with no text or objects?
+    flat: Outcome<Predicate>,
+    /// Which color fills the attached frame?
+    hue: Outcome<Choice<Hue>>,
+}
+
+/// Explicitly opt-in: one tiny synthetic frame per provider.
+#[rstest]
+#[case(Provider::OpenAi, "OPENAI_API_KEY")]
+#[case(Provider::Gemini, "GEMINI_API_KEY")]
+#[tokio::test]
+#[ignore = "requires a selected image-capable credential; may incur API charges"]
+async fn test_should_accept_image_evidence(#[case] provider: Provider, #[case] key_name: &str) {
+    let key = std::env::var(key_name).expect("selected provider credential is required");
+    let client = Client::builder(provider).api_key(key).build().unwrap();
+    let frame = Image::try_from(&include_bytes!("fixtures/red-frame.png")[..])
+        .unwrap()
+        .with_detail(ImageDetail::Low);
+    let input = Input::try_from("A rendered video frame for review.")
+        .unwrap()
+        .with_image(frame)
+        .unwrap();
+    let result = client
+        .decide_with::<FrameCheck>(RequestOptions::new(&input).unwrap())
+        .await
+        .unwrap();
+    let Outcome::Answered(hue) = result.value.hue else {
+        panic!("hue refused");
+    };
+    assert!(matches!(hue.value(), Hue::Red));
+    assert!(matches!(result.value.flat, Outcome::Answered(_)));
+    assert!(result.meta.usage.input_tokens > 0);
 }
 
 /// Explicitly opt-in: synthetic inputs only; three Workers AI models incur charges.

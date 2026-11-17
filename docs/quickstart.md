@@ -1,6 +1,6 @@
 # Quickstart
 
-Add `decision-rs = "0.6.0"` and Tokio with `macros` and
+Add `decision-rs = "0.7.0"` and Tokio with `macros` and
 `rt-multi-thread`. Rust 1.99 and edition 2024 are required. Default features include
 derives, bounded retry and rustls with aws-lc-rs.
 
@@ -65,6 +65,7 @@ export DECISION_PROVIDER=openai
 cargo run --example 03_multi_question_decision
 cargo run --example 07_batch_concurrent --features batch
 cargo run --example 09_cases_from_file --features batch,yaml -- cases.yaml
+cargo run --example 10_image_evidence -- frame.png
 ```
 
 Secret-free YAML configuration requires the `yaml` feature:
@@ -109,6 +110,7 @@ cargo test --test live --all-features test_should_accept_hosted_protocol::case_1
 cargo test --test live --all-features test_should_accept_hosted_protocol::case_2 -- --ignored --exact # OpenRouter
 cargo test --test live --all-features test_should_accept_hosted_protocol::case_3 -- --ignored --exact # TypeSafe
 make test-live-gemini # Gemini Decisions; GEMINI_API_KEY required
+make test-live-images # One synthetic frame to OpenAI and Gemini; both keys required
 make test-live-jev # Pinned 1.14 and rolling alias on both Jev providers
 make test-live-cloudflare # All three Clef models; token and account required
 ```
@@ -149,8 +151,9 @@ targets a proxy or gateway that speaks the same protocol.
 
 Behavior specific to Gemini:
 
-- Input is the SDK's text or canonical JSON. Image, audio, video and PDF blocks are
-  supported by the model but not exposed by this SDK.
+- Input is the SDK's text or canonical JSON, plus any attached images (see
+  [Image evidence](#image-evidence)). Audio, video and PDF blocks are supported by
+  the model but not exposed by this SDK.
 - The response carries no model name or response ID: `returned_model` and
   `response_id` are `None`. Output tokens are always 0, and cost is never reported.
 - Input blocked by Google's content filters returns
@@ -163,6 +166,71 @@ Behavior specific to Gemini:
   unnormalized entries.
 
 See the [research record](research/gemini-decisions.md) for sources and evidence limits.
+
+## Image evidence
+
+Attach PNG, JPEG or WebP images to the text evidence. The SDK sniffs the media
+type from the bytes (a caller cannot declare it), so a mislabeled or unsupported
+file fails locally with `Error::InvalidInput`:
+
+```rust,no_run
+# async fn run(key: String, png: Vec<u8>) -> Result<(), decision_rs::Error> {
+use decision_rs::{
+    Choice, ChoiceOptions, Client, Decision, Image, ImageDetail, Input, Predicate, RequestOptions,
+};
+
+#[derive(Debug, ChoiceOptions)]
+enum Composition {
+    /// Balanced, readable layout.
+    Full,
+    /// Mostly empty space.
+    Sparse,
+    /// Too many competing elements.
+    Crowded,
+}
+
+#[derive(Debug, Decision)]
+struct FrameReview {
+    /// Does the frame visibly show the narrated line?
+    shows_line: Predicate,
+    /// How full is the frame?
+    composition: Choice<Composition>,
+}
+
+let client = Client::openai(key)?; // or Client::gemini(key)?
+let frame = Image::try_from(png)?.with_detail(ImageDetail::Low);
+let input = Input::try_from(
+    "Narration: \"Revenue doubled in Q3.\"\nIntended picture: a rising bar chart.",
+)?
+.with_image(frame)?;
+let cache_key = input.digest().to_string(); // text + every image, in order
+let review = client.decide_with::<FrameReview>(RequestOptions::new(&input)?).await?;
+let usage = &review.meta.usage; // input_tokens, output_tokens, cached_tokens
+# Ok(())
+# }
+```
+
+- Limits: text stays required (at most 1 MiB); at most `MAX_IMAGES` (16) images,
+  `MAX_IMAGE_BYTES` (8 MiB) each and `MAX_TOTAL_IMAGE_BYTES` (16 MiB) in total.
+  `Settings::limits.image_bytes` lowers the per-call total; `request_bytes` bounds
+  the request excluding inline image payloads.
+- Encoding: OpenAI receives one user message with an `input_text` part followed by
+  `input_image` data URLs; Gemini receives a `text` block followed by `image` blocks
+  with base64 `data` and `mime_type`. `ImageDetail::Low`/`High` map to OpenAI
+  `detail` and Gemini `resolution`; `Auto` sends neither. Text-only inputs keep the
+  plain string `input` on both protocols.
+- Support: `Provider::accepts_images()` is true for OpenAI and Gemini. Jev
+  (OpenRouter, TypeSafe), Cloudflare Clef and their custom endpoints return
+  `Error::ImagesUnsupported` before any network call. Case files remain text/JSON.
+- Accounting: `ResponseMeta` reports provider-counted tokens (image tokens are part
+  of `input_tokens`), `cached_tokens`, the sent `wire_model` and, on OpenAI, the
+  `returned_model`. `decide_all_with` (feature `batch`) keeps this metadata for every
+  item of a batch.
+- Equal digests mean equal text, image bytes, order and detail. Use the digest, not
+  the text alone, for caching or deduplication.
+
+Run `make test-live-images` with `OPENAI_API_KEY` or `GEMINI_API_KEY` to send one
+tiny synthetic frame to each provider.
 
 ## Cloudflare-hosted Clef
 

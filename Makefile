@@ -21,6 +21,9 @@ test-live-cloudflare:
 test-live-gemini:
 	@cargo test -p decision-rs --all-features --test live test_should_accept_hosted_protocol::case_4 -- --ignored --exact
 
+test-live-images:
+	@cargo test -p decision-rs --all-features --test live test_should_accept_image_evidence -- --ignored
+
 test-live:
 	@cargo nextest run --all-features -- --ignored
 
@@ -61,4 +64,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test test-no-retry test-concurrency test-live test-live-jev test-live-cloudflare test-live-gemini docs lint lint-boundaries feature-check audit secret-check publish-check publish release update-submodule
+.PHONY: build test test-no-retry test-concurrency test-live test-live-jev test-live-cloudflare test-live-gemini test-live-images docs lint lint-boundaries feature-check audit secret-check publish-check publish release update-submodule

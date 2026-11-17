@@ -2,7 +2,7 @@
 
 use futures_util::{StreamExt, stream};
 
-use crate::{CaseResult, CaseSet, Client, Decision, Error, Input};
+use crate::{CaseResult, CaseSet, Client, Decided, Decision, Error, Input, RequestOptions};
 
 fn validate(len: usize, concurrency: usize) -> Result<(), Error> {
     if len > 10_000 || !(1..=128).contains(&concurrency) {
@@ -32,6 +32,35 @@ pub async fn decide_all<D: Decision>(
             .collect()
             .await,
     )
+}
+/// Execute prepared inputs like `decide_all`, retaining each call's metadata
+/// (token usage, returned model, request ID) for accounting.
+/// # Errors
+/// Returns an outer `InvalidInput` error for excessive count or invalid concurrency.
+/// Cancellation drops all unfinished request futures.
+/// ```no_run
+/// # async fn example<D: decision_rs::Decision>(client: &decision_rs::Client, inputs: &[decision_rs::Input]) -> Result<(), decision_rs::Error> {
+/// for result in decision_rs::decide_all_with::<D>(client, inputs, 4).await? {
+///     let decided = result?;
+///     tracing::info!(input_tokens = decided.meta.usage.input_tokens, "frame judged");
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn decide_all_with<D: Decision>(
+    client: &Client,
+    inputs: &[Input],
+    concurrency: usize,
+) -> Result<Vec<Result<Decided<D>, Error>>, Error> {
+    validate(inputs.len(), concurrency)?;
+    Ok(stream::iter(
+        inputs
+            .iter()
+            .map(|input| async move { client.decide_with::<D>(RequestOptions::new(input)?).await }),
+    )
+    .buffered(concurrency)
+    .collect()
+    .await)
 }
 /// Execute a validated case set, preserving order and individual failures.
 /// # Errors

@@ -2,7 +2,7 @@
 
 | Doc | Summary |
 |---|---|
-| [quickstart.md](quickstart.md) | Hosted/custom clients, Jev 1.14 defaults and version selection, Gemini Decisions, Cloudflare Clef, configuration, features and live smoke commands. |
+| [quickstart.md](quickstart.md) | Hosted/custom clients, Jev 1.14 defaults and version selection, Gemini Decisions, image evidence, Cloudflare Clef, configuration, features and live smoke commands. |
 | [primitives.md](primitives.md) | Predicate, Choice, Score, Outcome and checked dynamic answers. |
 | [thresholds.md](thresholds.md) | Event probability, native confidence, escalation and model-specific evaluation. |
 | [cases.md](cases.md) | Strict version 2 JSON/YAML cases and bounded execution. |

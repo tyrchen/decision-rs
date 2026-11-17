@@ -1,6 +1,6 @@
 //! Stable, redacted errors shared by every decision backend.
 
-use crate::metadata::ResponseMeta;
+use crate::{metadata::ResponseMeta, provider::Provider};
 
 /// Invalid schema diagnostics, safe to cache and display.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -30,6 +30,12 @@ pub enum Error {
     /// Input violates a documented resource limit.
     #[error("invalid input: {0}")]
     InvalidInput(&'static str),
+    /// The selected protocol cannot take image evidence; no request was sent.
+    #[error("backend does not accept image evidence")]
+    ImagesUnsupported {
+        /// Hosted provider; None for custom endpoints.
+        provider: Option<Provider>,
+    },
     /// Question schema is invalid.
     #[error(transparent)]
     InvalidSchema(#[from] SchemaError),

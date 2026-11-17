@@ -5,13 +5,18 @@ mod gemini;
 mod jev;
 mod openai;
 
+use base64::{display::Base64Display, engine::general_purpose::STANDARD};
 use indexmap::IndexMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
-    Answer, Answers, ChoiceAnswer, Distribution, Error, Input, Predicate, Probability, Questions,
-    ScoreAnswer, Usage, json, typed::Refusal,
+    Answer, Answers, ChoiceAnswer, Distribution, Error, Image, Input, Predicate, Probability,
+    Questions, ScoreAnswer, Usage, json, typed::Refusal,
 };
+
+/// Serialized bytes allowed per inline image beyond its base64 payload
+/// (data URL prefix, media type, detail and JSON framing).
+const INLINE_IMAGE_OVERHEAD: usize = 128;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Backend {
@@ -34,6 +39,12 @@ pub(crate) struct Decoded {
     pub usage: Usage,
 }
 impl Backend {
+    /// Whether the protocol carries image evidence natively.
+    pub const fn accepts_images(self) -> bool {
+        matches!(self, Self::OpenAi | Self::Gemini)
+    }
+    /// Encode a request. `limit` bounds everything except inline image payloads,
+    /// which `Limits::image_bytes` bounds before encoding.
     pub fn prepare(
         self,
         input: &Input,
@@ -41,6 +52,21 @@ impl Backend {
         model: &str,
         limit: usize,
     ) -> Result<Vec<u8>, Error> {
+        if !input.images().is_empty() && !self.accepts_images() {
+            return Err(Error::ImagesUnsupported { provider: None });
+        }
+        let limit = input
+            .images()
+            .iter()
+            .try_fold(limit, |cap, image| {
+                image
+                    .byte_len()
+                    .div_ceil(3)
+                    .checked_mul(4)?
+                    .checked_add(INLINE_IMAGE_OVERHEAD)
+                    .and_then(|encoded| cap.checked_add(encoded))
+            })
+            .ok_or(Error::InvalidInput("request body limit"))?;
         match self {
             Self::OpenAi => openai::prepare(input, questions, model, limit),
             Self::Gemini => gemini::prepare(input, questions, model, limit),
@@ -92,6 +118,24 @@ impl Backend {
                 request_id,
             },
         }
+    }
+}
+/// Standard padded base64, streamed into the JSON writer without an intermediate string.
+pub(super) struct Base64<'a>(pub &'a Image);
+impl Serialize for Base64<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&Base64Display::new(self.0.as_bytes(), &STANDARD))
+    }
+}
+/// `data:<sniffed media type>;base64,<payload>` URL, streamed like `Base64`.
+pub(super) struct DataUrl<'a>(pub &'a Image);
+impl Serialize for DataUrl<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&format_args!(
+            "data:{};base64,{}",
+            self.0.media_type(),
+            Base64Display::new(self.0.as_bytes(), &STANDARD)
+        ))
     }
 }
 /// Protocol-specific facts extracted from a bounded error body; never remote prose.
@@ -335,6 +379,52 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::Image;
+
+    fn framed(image_len: usize) -> Input {
+        let mut bytes = vec![b'x'; image_len];
+        bytes[..3].copy_from_slice(b"\xff\xd8\xff");
+        Input::try_from("frame")
+            .unwrap()
+            .with_image(Image::try_from(bytes).unwrap())
+            .unwrap()
+    }
+    fn one_question() -> Questions {
+        Questions::builder()
+            .predicate("q", "Condition?")
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_should_exclude_inline_images_from_request_byte_limit() {
+        let input = framed(64 * 1024);
+        for backend in [Backend::OpenAi, Backend::Gemini] {
+            let body = backend.prepare(&input, &one_question(), "m", 1024).unwrap();
+            assert!(body.len() > 64 * 1024);
+            assert!(matches!(
+                backend.prepare(&input, &one_question(), "m", 16),
+                Err(Error::InvalidInput("request body limit"))
+            ));
+        }
+    }
+
+    #[test]
+    fn test_should_refuse_images_on_text_only_protocols() {
+        let input = framed(16);
+        for backend in [
+            Backend::Jev,
+            Backend::SystemOne,
+            Backend::Cloudflare,
+            Backend::ClefSystemOne,
+        ] {
+            assert!(!backend.accepts_images());
+            assert!(matches!(
+                backend.prepare(&input, &one_question(), "m", 1 << 20),
+                Err(Error::ImagesUnsupported { provider: None })
+            ));
+        }
+    }
     proptest! {
         #[test]
         fn test_should_associate_reordered_answers_by_name(count in 1_usize..32, reverse in any::<bool>(), probability in 0.0_f64..1.0) {

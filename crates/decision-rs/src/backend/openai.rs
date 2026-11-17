@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    Decoded, NumericPolicy, WireUsage, bounded_identifier, choice, distribution, predicate,
-    refusal, score,
+    DataUrl, Decoded, NumericPolicy, WireUsage, bounded_identifier, choice, distribution,
+    predicate, refusal, score,
 };
 use crate::{
     Answer, Answers, Distribution, Error, Input, Probability, Question as DomainQuestion,
@@ -16,8 +16,51 @@ use crate::{
 #[derive(Serialize)]
 struct Request<'a> {
     model: &'a str,
-    input: &'a str,
+    input: RequestInput<'a>,
     questions: Vec<Question<'a>>,
+}
+/// Text-only evidence stays a string; images require one user message of parts.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum RequestInput<'a> {
+    Text(&'a str),
+    Messages([UserMessage<'a>; 1]),
+}
+#[derive(Serialize)]
+struct UserMessage<'a> {
+    role: &'static str,
+    content: Vec<Part<'a>>,
+}
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Part<'a> {
+    InputText {
+        text: &'a str,
+    },
+    InputImage {
+        image_url: DataUrl<'a>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<&'static str>,
+    },
+}
+impl<'a> RequestInput<'a> {
+    fn new(input: &'a Input) -> Self {
+        if input.images().is_empty() {
+            return Self::Text(input.as_str());
+        }
+        let content = std::iter::once(Part::InputText {
+            text: input.as_str(),
+        })
+        .chain(input.images().iter().map(|image| Part::InputImage {
+            image_url: DataUrl(image),
+            detail: image.detail().wire(),
+        }))
+        .collect();
+        Self::Messages([UserMessage {
+            role: "user",
+            content,
+        }])
+    }
 }
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -110,7 +153,7 @@ pub(super) fn prepare(
     json::encode(
         &Request {
             model,
-            input: input.as_str(),
+            input: RequestInput::new(input),
             questions,
         },
         cap,
@@ -296,4 +339,54 @@ fn decode_answer(key: &str, question: &DomainQuestion, wire: WireAnswer) -> Resu
         }
         _ => return Err(Error::for_question(key, "answer kind differs from schema")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::{Image, ImageDetail};
+
+    fn schema() -> Questions {
+        Questions::builder()
+            .predicate("shows_line", "Does the frame show the narrated line?")
+            .build()
+            .unwrap()
+    }
+    fn frames() -> Input {
+        Input::try_from("Narration: revenue doubled.")
+            .unwrap()
+            .with_images([
+                Image::try_from(&b"\x89PNG\r\n\x1a\nframe-a"[..]).unwrap(),
+                Image::try_from(&b"\xff\xd8\xff\xe0frame-b"[..])
+                    .unwrap()
+                    .with_detail(ImageDetail::Low),
+            ])
+            .unwrap()
+    }
+
+    #[test]
+    fn test_should_encode_images_as_user_message_parts() {
+        let body = prepare(&frames(), &schema(), "gpt-6-luna", 1 << 20).unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value,
+            json!({"model":"gpt-6-luna","input":[{"role":"user","content":[
+                {"type":"input_text","text":"Narration: revenue doubled."},
+                {"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgpmcmFtZS1h"},
+                {"type":"input_image","image_url":"data:image/jpeg;base64,/9j/4GZyYW1lLWI=","detail":"low"}
+            ]}],"questions":[
+                {"name":"shows_line","type":"predicate","instructions":"Does the frame show the narrated line?"}
+            ]})
+        );
+    }
+
+    #[test]
+    fn test_should_keep_text_only_input_a_string() {
+        let input = Input::try_from("ticket").unwrap();
+        let body = prepare(&input, &schema(), "gpt-6-luna", 1 << 20).unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["input"], json!("ticket"));
+    }
 }

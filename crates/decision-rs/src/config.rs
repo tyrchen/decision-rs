@@ -5,8 +5,8 @@ use std::{collections::BTreeMap, time::Duration};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
-    CloudflareAccountId, Error, Model, Probability, Provider, account::validate_account,
-    question::validate_key,
+    CloudflareAccountId, Error, MAX_TOTAL_IMAGE_BYTES, Model, Probability, Provider,
+    account::validate_account, question::validate_key,
 };
 
 /// Retry policy. Retry-After is honored even beyond the computed backoff cap.
@@ -60,10 +60,12 @@ impl RetryConfig {
 pub struct Limits {
     /// Evidence bytes, at most 1 MiB.
     pub input_bytes: usize,
-    /// Serialized request bytes, at most 2 MiB.
+    /// Serialized request bytes excluding inline image payloads, at most 2 MiB.
     pub request_bytes: usize,
     /// Streamed response bytes, at most 4 MiB.
     pub response_bytes: usize,
+    /// Encoded image bytes per call, at most 16 MiB.
+    pub image_bytes: usize,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -71,6 +73,7 @@ impl Default for Limits {
             input_bytes: 1 << 20,
             request_bytes: 2 << 20,
             response_bytes: 4 << 20,
+            image_bytes: MAX_TOTAL_IMAGE_BYTES,
         }
     }
 }
@@ -83,6 +86,8 @@ impl Limits {
             || self.request_bytes > hard.request_bytes
             || self.response_bytes == 0
             || self.response_bytes > hard.response_bytes
+            || self.image_bytes == 0
+            || self.image_bytes > hard.image_bytes
         {
             return Err(Error::InvalidConfiguration("byte limits"));
         }
@@ -342,5 +347,27 @@ mod cloudflare_tests {
         ] {
             assert!(Config::from_yaml_str(&invalid).is_err(), "{invalid}");
         }
+    }
+}
+
+#[cfg(test)]
+mod limits_tests {
+    use super::*;
+
+    #[test]
+    fn test_should_bound_image_bytes_and_accept_camel_case() {
+        assert_eq!(Limits::default().image_bytes, MAX_TOTAL_IMAGE_BYTES);
+        for image_bytes in [0, MAX_TOTAL_IMAGE_BYTES + 1] {
+            let mut settings = Settings::default();
+            settings.limits.image_bytes = image_bytes;
+            assert!(matches!(
+                settings.validate(),
+                Err(Error::InvalidConfiguration("byte limits"))
+            ));
+        }
+        let limits: Limits =
+            serde_json::from_value(serde_json::json!({"imageBytes": 1_048_576})).unwrap();
+        assert_eq!(limits.image_bytes, 1 << 20);
+        assert_eq!(limits.request_bytes, Limits::default().request_bytes);
     }
 }
